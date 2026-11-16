@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Collaborator</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <span class="logo">◍</span>
+      <div><strong>AI Collaborator</strong><small data-i18n="tagline"></small></div>
+    </div>
+    <button id="btn-new" class="primary wide" data-i18n="new_problem"></button>
+    <nav id="session-list"></nav>
+    <div class="side-foot">
+      <button id="btn-lab" class="ghost wide" data-i18n="lab"></button>
+      <div class="row">
+        <button id="provider" class="badge ghost small" title="⚙"></button>
+        <button id="btn-lang" class="ghost small">EN</button>
+      </div>
+    </div>
+  </aside>
+  <main id="main"></main>
+</div>
+<div id="bubble-layer" aria-live="polite"></div>
+<div id="modal" class="hidden"></div>
+<div id="toast" class="hidden"></div>
+<script src="/i18n.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

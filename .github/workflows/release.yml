@@ -1,0 +1,97 @@
+name: release
+# Builds the Windows package and publishes it on the Releases page.
+#   - push a tag:      git tag v0.1.0 && git push origin v0.1.0
+#   - or run manually: Actions -> release -> Run workflow, and type the version
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to create, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build AI-Collaborator.exe
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          pyinstaller --noconfirm --clean --onefile --console --name AI-Collaborator --add-data "prompts;prompts" --add-data "web;web" run.py
+
+      - name: Smoke test the packaged app
+        shell: pwsh
+        run: |
+          $env:COLLAB_NO_BROWSER = "1"
+          $env:COLLAB_PROVIDER = "mock"
+          $env:COLLAB_PORT = "8799"
+          $env:COLLAB_HOME = "$env:RUNNER_TEMP\collab-home"
+          $app = Start-Process -FilePath "dist\AI-Collaborator.exe" -PassThru
+          try {
+            $ok = $false
+            foreach ($i in 1..40) {
+              Start-Sleep -Seconds 1
+              try {
+                $config = Invoke-RestMethod "http://127.0.0.1:8799/api/config"
+                $page = Invoke-WebRequest "http://127.0.0.1:8799/" -UseBasicParsing
+                $ok = $true
+                break
+              } catch { }
+            }
+            if (-not $ok) { throw "the packaged app did not start" }
+            if ($config.provider -ne "mock") { throw "unexpected provider: $($config.provider)" }
+            if ($page.Content -notmatch "AI Collaborator") { throw "web client was not bundled" }
+            $body = @{ problem = "packaged build smoke test: where do I start?" } | ConvertTo-Json
+            $view = Invoke-RestMethod "http://127.0.0.1:8799/api/sessions" -Method Post -Body $body -ContentType "application/json"
+            if (-not $view.session.state.frame) { throw "prompts were not bundled or framing failed" }
+            Write-Host "smoke test passed, version $($config.version)"
+          } finally {
+            Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "AI-Collaborator-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory -Path "release\$name" | Out-Null
+          Copy-Item "dist\AI-Collaborator.exe" "release\$name\"
+          Copy-Item "packaging\windows\README.txt" "release\$name\README.txt"
+          Copy-Item ".env.example" "release\$name\"
+          Compress-Archive -Path "release\$name" -DestinationPath "release\$name.zip"
+          (Get-FileHash "release\$name.zip" -Algorithm SHA256).Hash + "  $name.zip" | Set-Content "release\$name.zip.sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: AI Collaborator ${{ env.VERSION }}
+          generate_release_notes: true
+          body: |
+            ## Windows
+
+            下载 `AI-Collaborator-${{ env.VERSION }}-windows-x64.zip`，解压后双击 `AI-Collaborator.exe`，浏览器会自动打开。
+            无需安装 Python。首次使用点击页面左下角的状态标签填入 API Key；不填则为离线演示模式。
+
+            程序未做代码签名，Windows 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”即可。
+
+            Download the zip, unzip, double-click `AI-Collaborator.exe`. No Python needed. Click the status
+            label at the bottom left to add an API key. The executable is unsigned, so SmartScreen may ask
+            for confirmation ("More info" → "Run anyway").
+          files: |
+            release/*.zip
+            release/*.sha256
