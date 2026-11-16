@@ -4,10 +4,21 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false   # one interpreter failing should not hide the other's result
       matrix:
-        python: ["3.9", "3.13"]
+        include:
+          # Oldest supported interpreter. Python 3.9 is end-of-life and actions/setup-python
+          # has no build of it for newer runner images (ubuntu-latest is now 26.04), so this
+          # job is pinned to the newest image that still has one. When ubuntu-24.04 is
+          # retired, raise the minimum Python version here and in README/CLAUDE.md together.
+          - os: ubuntu-24.04
+            python: "3.9"
+          # Current interpreter on the current image.
+          - os: ubuntu-latest
+            python: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +27,6 @@ jobs:
       - name: Unit tests (offline mock model, no dependencies)
         run: python -m unittest discover -s tests -v
       - name: Evaluation harness smoke run
-        run: python eval/run_eval.py --turns 1 --scenarios waste-sorting grid-paths --out /tmp/reports
+        run: python eval/run_eval.py --turns 1 --scenarios waste-sorting grid-paths --out "$RUNNER_TEMP/reports"
         env:
           COLLAB_PROVIDER: mock
