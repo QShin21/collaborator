@@ -70,6 +70,8 @@ user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
 user32.EnumClipboardFormats.restype = wintypes.UINT
 user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 user32.GetClipboardOwner.restype = wintypes.HWND
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+user32.RegisterClipboardFormatW.restype = wintypes.UINT
 user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
 user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
@@ -150,6 +152,7 @@ HWND_TOPMOST = wintypes.HWND(-1)
 GA_ROOT = 2
 MONITOR_DEFAULTTONEAREST = 2
 CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT, CF_LOCALE = 1, 7, 13, 16
+_PASTE_MARKER_NAME = "Banxing temporary paste lease v1"
 GMEM_MOVEABLE = 0x0002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 INPUT_KEYBOARD, KEYEVENTF_KEYUP = 1, 0x0002
@@ -392,6 +395,24 @@ class _RestorableText(str):
         return result
 
 
+class PasteLease:
+    """Our clipboard owner and nonce live until paste or restoration finishes."""
+
+    def __init__(self, owner, marker_format, nonce, text):
+        self.owner = owner
+        self.marker_format = marker_format
+        self.nonce = nonce
+        self.text = text
+        self.sequence = 0
+        self.formats = None
+        self.locale = None
+
+    def close(self):
+        if self.owner:
+            user32.DestroyWindow(self.owner)
+            self.owner = 0
+
+
 def _open_clipboard(attempts=8, owner=None):
     for _ in range(attempts):
         if user32.OpenClipboard(owner):
@@ -400,24 +421,51 @@ def _open_clipboard(attempts=8, owner=None):
     return False
 
 
+def _clipboard_formats_open():
+    """All currently advertised format IDs, or None for an invalid enumeration."""
+    count = user32.CountClipboardFormats()
+    if not 0 <= count <= 64:
+        return None
+    formats, previous = [], 0
+    for _ in range(count):
+        previous = user32.EnumClipboardFormats(previous)
+        if not previous:
+            return None
+        formats.append(previous)
+    return formats
+
+
+def _clipboard_locale_open():
+    """Copy the bounded CF_LOCALE HGLOBAL, or None if it cannot be restored."""
+    locale_handle = user32.GetClipboardData(CF_LOCALE)
+    if not locale_handle:
+        return None
+    size = kernel32.GlobalSize(locale_handle)
+    # The value is an LCID DWORD. Retain allocator padding byte-for-byte,
+    # but reject malformed/unreasonably large handles rather than truncating.
+    if not 4 <= size <= 64:
+        return None
+    locale_pointer = kernel32.GlobalLock(locale_handle)
+    if not locale_pointer:
+        return None
+    try:
+        return ctypes.string_at(locale_pointer, size)
+    finally:
+        kernel32.GlobalUnlock(locale_handle)
+
+
 def _clipboard_snapshot_open():
     """("empty", None) | ("text", str) | ("other", None) | ("busy", None).
     "other" means the clipboard holds something that could not be put back."""
-    count = user32.CountClipboardFormats()
-    if count == 0:
+    formats = _clipboard_formats_open()
+    if formats == []:
         return "empty", None
-    if count < 0:
+    if formats is None:
         return "busy", None
     # Windows synthesizes CF_TEXT and CF_OEMTEXT for CF_UNICODETEXT and may add
     # CF_LOCALE when the clipboard closes. Any other format (HTML, image, file
     # list, etc.) would be destroyed by a text-only restoration, so do not
     # borrow it. Unicode must be first: a synthesized conversion is not a copy.
-    formats, previous = [], 0
-    for _ in range(count):
-        previous = user32.EnumClipboardFormats(previous)
-        if not previous:
-            return "other", None
-        formats.append(previous)
     # Only the observed Unicode-first conversion order is accepted. This
     # rejects many extra native formats, but cannot prove that CF_TEXT/OEMTEXT
     # were synthesized rather than explicitly supplied with identical IDs.
@@ -427,21 +475,9 @@ def _clipboard_snapshot_open():
         return "other", None
     locale = None
     if CF_LOCALE in formats:
-        locale_handle = user32.GetClipboardData(CF_LOCALE)
-        if not locale_handle:
+        locale = _clipboard_locale_open()
+        if locale is None:
             return "other", None
-        size = kernel32.GlobalSize(locale_handle)
-        # The value is an LCID DWORD. Retain any allocator padding byte-for-byte,
-        # but reject malformed/unreasonably large handles rather than truncating.
-        if not 4 <= size <= 64:
-            return "other", None
-        locale_pointer = kernel32.GlobalLock(locale_handle)
-        if not locale_pointer:
-            return "other", None
-        try:
-            locale = ctypes.string_at(locale_pointer, size)
-        finally:
-            kernel32.GlobalUnlock(locale_handle)
     handle = user32.GetClipboardData(CF_UNICODETEXT)
     if not handle:
         return "other", None
@@ -504,6 +540,108 @@ def clipboard_diagnostic():
     return result
 
 
+def _paste_lease_open(lease):
+    """Verify ownership and nonce under an already open clipboard lock."""
+    current_owner = user32.GetClipboardOwner()
+    if not lease.owner or not current_owner:
+        return "lost", user32.GetClipboardSequenceNumber()
+    if current_owner != lease.owner:
+        return "changed", user32.GetClipboardSequenceNumber()
+    formats = _clipboard_formats_open()
+    if (formats is None or not formats or formats[0] != CF_UNICODETEXT
+            or formats.count(lease.marker_format) != 1
+            or (lease.formats is not None and tuple(formats) != lease.formats)
+            or any(fmt not in (CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT, CF_LOCALE,
+                               lease.marker_format) for fmt in formats)):
+        return "lost", user32.GetClipboardSequenceNumber()
+    marker_handle = user32.GetClipboardData(lease.marker_format)
+    if not marker_handle or not len(lease.nonce) <= kernel32.GlobalSize(marker_handle) <= 64:
+        return "lost", user32.GetClipboardSequenceNumber()
+    marker_pointer = kernel32.GlobalLock(marker_handle)
+    if not marker_pointer:
+        return "lost", user32.GetClipboardSequenceNumber()
+    try:
+        marker_matches = ctypes.string_at(marker_pointer, len(lease.nonce)) == lease.nonce
+    finally:
+        kernel32.GlobalUnlock(marker_handle)
+    locale = _clipboard_locale_open() if CF_LOCALE in formats else None
+    if (not marker_matches or (CF_LOCALE in formats and locale is None)
+            or (lease.formats is not None and locale != lease.locale)):
+        return "lost", user32.GetClipboardSequenceNumber()
+    text_handle = user32.GetClipboardData(CF_UNICODETEXT)
+    if not text_handle:
+        return "lost", user32.GetClipboardSequenceNumber()
+    text_pointer = kernel32.GlobalLock(text_handle)
+    if not text_pointer:
+        return "lost", user32.GetClipboardSequenceNumber()
+    try:
+        text_matches = ctypes.wstring_at(text_pointer) == lease.text
+    finally:
+        kernel32.GlobalUnlock(text_handle)
+    sequence = user32.GetClipboardSequenceNumber()
+    if text_matches and sequence and lease.formats is None:
+        lease.formats = tuple(formats)
+        lease.locale = locale
+    return ("same" if text_matches and sequence else "lost"), sequence
+
+
+def clipboard_begin_paste(sequence, text, rollback):
+    """Borrow the clipboard with an owner and random marker that outlive CloseClipboard.
+
+    The system can add synthesized formats *at CloseClipboard*, changing the
+    sequence. The new sequence is adopted only after a second locked check of
+    our live owner, nonce, Unicode text and allowed format set. Ordinary user
+    copies change the owner and are never attributed to this transaction.
+    """
+    marker_format = user32.RegisterClipboardFormatW(_PASTE_MARKER_NAME)
+    if not 0xC000 <= marker_format <= 0xFFFF:
+        return "busy", None
+    owner = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, None, None, None, None)
+    if not owner:
+        return "busy", None
+    lease = PasteLease(owner, marker_format, os.urandom(32), text)
+    status, _ = _clipboard_write(owner, text, sequence, rollback,
+                                 marker=(marker_format, lease.nonce))
+    if status != "written":
+        lease.close()
+        return status, None
+    if not _open_clipboard():
+        lease.close()
+        return "lost", None  # temporary content may remain; do not inject keys
+    try:
+        status, stable_sequence = _paste_lease_open(lease)
+    finally:
+        user32.CloseClipboard()
+    if status == "same":
+        lease.sequence = stable_sequence
+        return "written", lease
+    lease.close()
+    return status, None
+
+
+def clipboard_paste_current(lease):
+    """True only while this lease still has the same owner/nonce/sequence."""
+    if not _open_clipboard():
+        return False
+    try:
+        status, sequence = _paste_lease_open(lease)
+        return status == "same" and sequence == lease.sequence
+    finally:
+        user32.CloseClipboard()
+
+
+def clipboard_end_paste(lease, saved):
+    """Restore only if the lease is still ours; always release its owner window."""
+    owner = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, None, None, None, None)
+    try:
+        return _clipboard_write(owner, saved, lease.sequence, ("text", lease.text),
+                                expected_lease=lease)
+    finally:
+        if owner:
+            user32.DestroyWindow(owner)
+        lease.close()
+
+
 def clipboard_set(text):
     """Put text on the clipboard; None empties it.
 
@@ -520,15 +658,17 @@ def clipboard_set(text):
 
 
 def clipboard_replace_if_sequence(sequence, text, rollback=None):
-    """Replace only our own temporary clipboard value, never a newer user copy.
+    """Conditionally replace a captured value, never a newer user copy.
 
     ``rollback`` is the previously captured (kind, text). It is preallocated
     too, so if placing the new value fails after EmptyClipboard, the old value
     can be put back while still holding the clipboard lock.
 
-    Returns (written | changed | busy | lost, new sequence number). ``lost``
-    means even the rollback failed and must be reported to the user. The
-    comparison, write and returned sequence share one clipboard lock.
+    Returns (written | changed | busy | lost, lock-time sequence). ``lost``
+    means even the rollback failed and must be reported to the user. Windows
+    may add synthesized formats at CloseClipboard, so the returned sequence
+    must not be reused as a later CAS token. Use clipboard_begin_paste for a
+    paste lease, or recapture before another independent change.
     """
     owner = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, None, None, None, None)
     try:
@@ -560,21 +700,25 @@ def _clipboard_locale_handle(text):
     return None if locale is None else _clipboard_bytes_handle(locale)
 
 
-def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
+def _clipboard_write(owner, text, expected_sequence=None, rollback=None,
+                     marker=None, expected_lease=None):
     if not owner:
         return "busy", 0
     handle = _clipboard_handle(text)
     locale_handle = _clipboard_locale_handle(text)
+    marker_handle = _clipboard_bytes_handle(marker[1]) if marker is not None else None
     rollback_kind, rollback_text = rollback if rollback is not None else (None, None)
     rollback_handle = _clipboard_handle(rollback_text) if rollback_kind == "text" else None
     rollback_locale_handle = _clipboard_locale_handle(rollback_text) if rollback_kind == "text" else None
 
     def free_pending():
-        for pending in (handle, locale_handle, rollback_handle, rollback_locale_handle):
+        for pending in (handle, locale_handle, marker_handle,
+                        rollback_handle, rollback_locale_handle):
             if pending:
                 kernel32.GlobalFree(pending)
 
-    if any(pending == 0 for pending in (handle, locale_handle, rollback_handle, rollback_locale_handle)):
+    if any(pending == 0 for pending in (handle, locale_handle, marker_handle,
+                                        rollback_handle, rollback_locale_handle)):
         free_pending()
         return "busy", 0
     if not _open_clipboard(owner=owner):
@@ -602,15 +746,24 @@ def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
 
     status, sequence = "busy", 0
     try:
+        may_write = True
         if (expected_sequence is not None
                 and user32.GetClipboardSequenceNumber() != expected_sequence):
             status = "changed"
-        elif expected_sequence == 0 and (
+            may_write = False
+        if may_write and expected_lease is not None:
+            lease_status, lease_sequence = _paste_lease_open(expected_lease)
+            if lease_status != "same" or lease_sequence != expected_sequence:
+                status = ("changed" if lease_status == "changed"
+                          or lease_sequence != expected_sequence else "lost")
+                may_write = False
+        if may_write and expected_sequence == 0 and (
                 rollback_kind != "empty" or _clipboard_snapshot_open()[0] != "empty"):
             # With no advancing counter, another copy could otherwise replace
             # the initially empty clipboard before we acquire this lock.
             status = "changed"
-        elif user32.EmptyClipboard():
+            may_write = False
+        if may_write and user32.EmptyClipboard():
             placed = text is None or bool(user32.SetClipboardData(CF_UNICODETEXT, handle))
             if placed:
                 handle = None             # the system owns the memory now
@@ -618,6 +771,10 @@ def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
                     placed = bool(user32.SetClipboardData(CF_LOCALE, locale_handle))
                     if placed:
                         locale_handle = None
+                if placed and marker_handle:
+                    placed = bool(user32.SetClipboardData(marker[0], marker_handle))
+                    if placed:
+                        marker_handle = None
             status = "written" if placed else restore_original(needs_empty=handle is None)
         sequence = user32.GetClipboardSequenceNumber()  # before releasing the lock
         if status == "written" and expected_sequence is not None and sequence == expected_sequence:

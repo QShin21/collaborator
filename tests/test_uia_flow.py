@@ -395,6 +395,15 @@ class UiaFlow(RigCase):
             return "written", clip["sequence"]
 
         self.win32.clipboard_replace_if_sequence = replace
+
+        def begin(sequence, text, rollback=None):
+            status, new_sequence = self.win32.clipboard_replace_if_sequence(sequence, text, rollback)
+            return status, (types.SimpleNamespace(sequence=new_sequence) if status == "written" else None)
+
+        self.win32.clipboard_begin_paste = begin
+        self.win32.clipboard_paste_current = lambda lease: clip["sequence"] == lease.sequence
+        self.win32.clipboard_end_paste = lambda lease, saved: self.win32.clipboard_replace_if_sequence(
+            lease.sequence, saved, rollback=("text", clip["text"]))
         return clip, calls
 
     def test_paste_is_one_batched_input_and_restores_the_clipboard(self):

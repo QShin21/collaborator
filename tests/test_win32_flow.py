@@ -313,6 +313,206 @@ class Win32Flow(unittest.TestCase):
         self.assertEqual((status, state["text"], state["locale"], state["sets"]),
                          ("busy", "original", b"old", 3))
 
+    def paste_lease_world(self):
+        """Fake CloseClipboard adding locale and conversions after the locked write."""
+        marker_format = 0xC001
+        state = {"sequence": 5, "owner": 99, "open_owner": None,
+                 "text": "old", "locale": b"\x09\x04\x00\x00", "marker": None,
+                 "formats": [13, 16, 1, 7], "empties": 0, "destroyed": [],
+                 "close_hook": None, "deny_open": False, "fail_marker": False,
+                 "buffers": {}, "data": {}, "next_handle": 100, "next_window": 55}
+
+        def allocate(data):
+            state["next_handle"] += 1
+            handle = state["next_handle"]
+            state["data"][handle] = data
+            return handle
+
+        self.win32._clipboard_handle = lambda text: None if text is None else allocate(str(text))
+        self.win32._clipboard_locale_handle = lambda text: (
+            allocate(text.locale) if getattr(text, "locale", None) else None)
+        self.win32._clipboard_bytes_handle = allocate
+        self.user32.set("RegisterClipboardFormatW", lambda name: marker_format)
+
+        def create(*args):
+            result = state["next_window"]
+            state["next_window"] += 11
+            return result
+
+        def destroy(hwnd):
+            state["destroyed"].append(hwnd)
+            if state["owner"] == hwnd:
+                state["owner"] = 0
+            return 1
+
+        def open_clip(owner):
+            if state["deny_open"]:
+                return 0
+            state["open_owner"] = owner
+            return 1
+
+        def close():
+            if state["text"] is not None:
+                for fmt in (16, 1, 7):
+                    if fmt not in state["formats"]:
+                        state["formats"].append(fmt)
+                        state["sequence"] += 1
+                if state["locale"] is None:
+                    state["locale"] = b"\x09\x04\x00\x00"
+            hook, state["close_hook"] = state["close_hook"], None
+            if hook:
+                hook(state)
+            return 1
+
+        def empty():
+            state.update(sequence=state["sequence"] + 1, owner=state["open_owner"],
+                         text=None, locale=None, marker=None, formats=[],
+                         empties=state["empties"] + 1)
+            return 1
+
+        def set_data(fmt, handle):
+            if fmt == marker_format and state["fail_marker"]:
+                return 0
+            data = state["data"][handle]
+            if fmt == 13:
+                state["text"] = data
+            elif fmt == 16:
+                state["locale"] = data
+            elif fmt == marker_format:
+                state["marker"] = data
+            state["formats"].append(fmt)
+            state["sequence"] += 1
+            return handle
+
+        def enum(previous):
+            if not previous:
+                return state["formats"][0]
+            index = state["formats"].index(previous) + 1
+            return state["formats"][index] if index < len(state["formats"]) else 0
+
+        def get_data(fmt):
+            handle = 1000 + fmt
+            if fmt == 13:
+                buffer = ctypes.create_unicode_buffer(state["text"])
+            else:
+                content = state["locale"] if fmt == 16 else state["marker"]
+                buffer = ctypes.create_string_buffer(content)
+            state["buffers"][handle] = buffer
+            return handle
+
+        self.user32.set("CreateWindowExW", create)
+        self.user32.set("DestroyWindow", destroy)
+        self.user32.set("OpenClipboard", open_clip)
+        self.user32.set("CloseClipboard", close)
+        self.user32.set("GetClipboardOwner", lambda: state["owner"])
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+        self.user32.set("EmptyClipboard", empty)
+        self.user32.set("SetClipboardData", set_data)
+        self.user32.set("CountClipboardFormats", lambda: len(state["formats"]))
+        self.user32.set("EnumClipboardFormats", enum)
+        self.user32.set("GetClipboardData", get_data)
+        self.kernel32.set("GlobalSize", lambda handle: len(state["buffers"][handle].raw))
+        self.kernel32.set("GlobalLock", lambda handle: ctypes.addressof(state["buffers"][handle]))
+        return state
+
+    def test_paste_lease_adopts_post_close_sequence_and_keeps_owner_until_restored(self):
+        state = self.paste_lease_world()
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual(status, "written")
+        self.assertEqual(lease.sequence, 11)  # 8 in lock; locale/ANSI/OEM add 3 on Close
+        self.assertEqual(state["destroyed"], [])
+        self.assertTrue(self.win32.clipboard_paste_current(lease))
+        restored, _ = self.win32.clipboard_end_paste(lease, "old")
+        self.assertEqual((restored, state["text"], state["marker"]), ("written", "old", None))
+        self.assertEqual(state["destroyed"], [66, 55])
+
+    def test_close_time_new_copy_is_not_mistaken_for_our_paste(self):
+        for new_text, clone_marker in (("different", False), ("temporary", False),
+                                       ("temporary", True)):
+            with self.subTest(new_text=new_text, clone_marker=clone_marker):
+                self.setUp()
+                state = self.paste_lease_world()
+
+                def user_copy(s):
+                    s.update(owner=77, text=new_text, sequence=s["sequence"] + 1,
+                             marker=s["marker"] if clone_marker else None,
+                             formats=list(s["formats"]) if clone_marker else [13, 16, 1, 7])
+
+                state["close_hook"] = user_copy
+                status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+                self.assertEqual((status, lease, state["text"], state["empties"]),
+                                 ("changed", None, new_text, 1))
+
+    def test_paste_lease_rejects_unknown_format_changed_nonce_or_invalid_owner(self):
+        for mutation in ("format", "nonce", "owner", "sequence"):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                state = self.paste_lease_world()
+
+                def mutate(s):
+                    if mutation == "format":
+                        s["formats"].append(0xC100)
+                    elif mutation == "nonce":
+                        s["marker"] = b"x" * 32
+                    elif mutation == "owner":
+                        s["owner"] = 0
+                    else:
+                        s["sequence"] = 0
+
+                state["close_hook"] = mutate
+                status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+                self.assertEqual(status, "lost")
+                self.assertIsNone(lease)
+                self.assertEqual(state["empties"], 1)
+
+    def test_paste_lease_fails_closed_if_post_close_verification_cannot_open(self):
+        state = self.paste_lease_world()
+        state["close_hook"] = lambda s: s.update(deny_open=True)
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual((status, lease, state["empties"]), ("lost", None, 1))
+
+    def test_paste_lease_restoration_does_not_overwrite_a_new_user_copy(self):
+        state = self.paste_lease_world()
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual(status, "written")
+        state.update(owner=77, text="new user copy", marker=None,
+                     sequence=state["sequence"] + 1, formats=[13, 16, 1, 7])
+        self.assertFalse(self.win32.clipboard_paste_current(lease))
+        empties = state["empties"]
+        restored, _ = self.win32.clipboard_end_paste(lease, "old")
+        self.assertEqual((restored, state["text"], state["empties"]),
+                         ("changed", "new user copy", empties))
+
+    def test_same_text_and_cloned_nonce_with_new_owner_are_not_our_lease(self):
+        state = self.paste_lease_world()
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual(status, "written")
+        state["owner"] = 77         # another process copied the same body and marker
+        self.assertFalse(self.win32.clipboard_paste_current(lease))
+        empties = state["empties"]
+        restored, _ = self.win32.clipboard_end_paste(lease, "old")
+        self.assertEqual((restored, state["text"], state["empties"]),
+                         ("changed", "temporary", empties))
+
+    def test_paste_lease_rejects_a_new_format_even_without_counter_change(self):
+        state = self.paste_lease_world()
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual(status, "written")
+        state["formats"].append(0xC100)
+        self.assertFalse(self.win32.clipboard_paste_current(lease))
+        empties = state["empties"]
+        restored, _ = self.win32.clipboard_end_paste(lease, "old")
+        self.assertEqual((restored, state["text"], state["empties"]),
+                         ("lost", "temporary", empties))
+
+    def test_failed_marker_write_rolls_back_the_original_before_unlocking(self):
+        state = self.paste_lease_world()
+        state["fail_marker"] = True
+        status, lease = self.win32.clipboard_begin_paste(5, "temporary", ("text", "old"))
+        self.assertEqual((status, lease, state["text"], state["marker"]),
+                         ("busy", None, "old", None))
+        self.assertEqual(state["empties"], 2)
+
     def test_shortcuts_are_atomic_ordered_and_cannot_include_enter(self):
         captured = []
 

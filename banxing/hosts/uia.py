@@ -544,7 +544,7 @@ class WindowsCodexClient(CodexClient):
             return False, "focus"
         temporary = None
         if text:
-            swapped, temporary = win32.clipboard_replace_if_sequence(before, text, rollback=(kind, saved))
+            swapped, temporary = win32.clipboard_begin_paste(before, text, rollback=(kind, saved))
             if swapped != "written":
                 return False, "clipboard_restore" if swapped == "lost" else "clipboard_busy"
         ok, why = False, "not_received"
@@ -560,7 +560,7 @@ class WindowsCodexClient(CodexClient):
                 elif not self._focus(hwnd, box):
                     why = "focus"
                     sent = False
-                elif win32.clipboard_capture()[2] != temporary:
+                elif not win32.clipboard_paste_current(temporary):
                     # Another copy may have arrived while focus was being set.
                     # Never paste that content into the user's draft.
                     why = "clipboard_busy"
@@ -579,8 +579,8 @@ class WindowsCodexClient(CodexClient):
         finally:
             if temporary is not None:
                 time.sleep(0.15)                   # let the paste finish reading the clipboard
-                restored, _ = win32.clipboard_replace_if_sequence(
-                    temporary, saved if kind == "text" else None, rollback=("text", text))
+                restored, _ = win32.clipboard_end_paste(
+                    temporary, saved if kind == "text" else None)
                 if restored in ("busy", "lost"):
                     log.warning("temporary paste clipboard could not be restored")
                     why = "clipboard_restore"
