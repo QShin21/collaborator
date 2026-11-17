@@ -84,10 +84,56 @@ class Win32Flow(unittest.TestCase):
                 self.formats(formats)
                 self.assertEqual(self.win32._clipboard_snapshot_open(), ("other", None))
 
-    def test_a_missing_change_counter_refuses_a_snapshot(self):
+    def test_an_initial_empty_zero_change_counter_can_be_captured(self):
+        self.user32.set("CountClipboardFormats", lambda: 0)
+        self.user32.set("GetClipboardSequenceNumber", lambda: 0)
+        self.assertEqual(self.win32.clipboard_capture(), ("empty", None, 0))
+
+    def test_a_nonempty_zero_counter_refuses_to_borrow_the_clipboard(self):
         self.formats([13, 1, 7])
         self.user32.set("GetClipboardSequenceNumber", lambda: 0)
         self.assertEqual(self.win32.clipboard_capture(), ("busy", None, 0))
+
+    def test_a_new_copy_after_empty_zero_capture_is_not_overwritten(self):
+        # A permanently zero counter cannot identify a newer copy. Re-read the
+        # empty state under the swap lock before touching anything.
+        self.formats([13, 1, 7], "user's newer copy")
+        calls = []
+        self.win32._clipboard_handle = lambda text: 101
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: 0)
+        self.user32.set("EmptyClipboard", lambda: calls.append("empty") or 1)
+        status, _ = self.win32.clipboard_replace_if_sequence(0, "temporary", rollback=("empty", None))
+        self.assertEqual(status, "changed")
+        self.assertNotIn("empty", calls)
+
+    def test_a_zero_counter_that_does_not_advance_is_rolled_back_before_unlock(self):
+        state = {"text": None, "empties": 0}
+        self.win32._clipboard_handle = lambda text: 101 if text == "temporary" else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: 0)
+        self.user32.set("CountClipboardFormats", lambda: 0)
+
+        def empty():
+            state["text"] = None
+            state["empties"] += 1
+            return 1
+
+        self.user32.set("EmptyClipboard", empty)
+        self.user32.set("SetClipboardData", lambda fmt, handle: state.update(text="temporary") or handle)
+        status, sequence = self.win32.clipboard_replace_if_sequence(0, "temporary", rollback=("empty", None))
+        self.assertEqual((status, sequence, state["text"], state["empties"]), ("busy", 0, None, 2))
+
+    def test_a_fresh_zero_counter_that_advances_allows_the_paste_transaction(self):
+        state = {"sequence": 0}
+        self.win32._clipboard_handle = lambda text: 101
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+        self.user32.set("CountClipboardFormats", lambda: 0)
+        self.user32.set("EmptyClipboard", lambda: state.update(sequence=state["sequence"] + 1) or 1)
+        self.user32.set("SetClipboardData", lambda fmt, handle: handle)
+        self.assertEqual(self.win32.clipboard_replace_if_sequence(0, "temporary", rollback=("empty", None)),
+                         ("written", 1))
 
     def test_a_new_user_copy_is_not_overwritten(self):
         calls = []

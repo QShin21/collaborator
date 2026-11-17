@@ -160,10 +160,15 @@ class StandInWindow(unittest.TestCase):
     def test_3_paste_path_fills_and_puts_the_clipboard_back(self):
         snap = self.snapshot()
         kind, saved, sequence = self.win32.clipboard_capture()
-        self.assertIn(kind, ("empty", "text"), "cannot replace a clipboard that cannot be restored")
+        deadline = time.monotonic() + 2
+        while kind == "busy" and time.monotonic() < deadline:
+            time.sleep(0.1)
+            kind, saved, sequence = self.win32.clipboard_capture()
+        self.assertIn(kind, ("empty", "text"),
+                      f"cannot replace a clipboard that cannot be restored: {self.win32.clipboard_diagnostic()}")
         swapped, _ = self.win32.clipboard_replace_if_sequence(
             sequence, "clipboard before", rollback=(kind, saved))
-        self.assertEqual(swapped, "written")
+        self.assertEqual(swapped, "written", self.win32.clipboard_diagnostic())
         try:
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
             actual = self.snapshot().draft

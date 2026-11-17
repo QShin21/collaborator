@@ -69,6 +69,7 @@ user32.CountClipboardFormats.restype = ctypes.c_int
 user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
 user32.EnumClipboardFormats.restype = wintypes.UINT
 user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+user32.GetClipboardOwner.restype = wintypes.HWND
 user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
 user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
@@ -428,9 +429,12 @@ def clipboard_capture():
     try:
         kind, text = _clipboard_snapshot_open()
         sequence = user32.GetClipboardSequenceNumber()
-        # Without a usable change counter we could overwrite a new user copy
-        # while restoring. No automatic paste is worth that ambiguity.
-        return ("busy", None, 0) if not sequence else (kind, text, sequence)
+        # Zero is also the initial sequence on a fresh window station. A write
+        # below may probe it only while the clipboard is empty. A nonempty
+        # zero-sequence snapshot cannot be safely identified after focus changes.
+        if sequence == 0 and kind != "empty":
+            return "busy", None, 0
+        return kind, text, sequence
     finally:
         user32.CloseClipboard()
 
@@ -438,6 +442,22 @@ def clipboard_capture():
 def clipboard_snapshot():
     kind, text, _ = clipboard_capture()
     return kind, text
+
+
+def clipboard_diagnostic():
+    """Content-free detail for a failed live compatibility check."""
+    result = {"sequence": user32.GetClipboardSequenceNumber(),
+              "owner": bool(user32.GetClipboardOwner())}
+    if not _open_clipboard(attempts=1):
+        result.update(open=False, error=ctypes.get_last_error())
+        return result
+    try:
+        count = user32.CountClipboardFormats()
+        result.update(open=True, formats=count,
+                      first_format=user32.EnumClipboardFormats(0) if count > 0 else 0)
+    finally:
+        user32.CloseClipboard()
+    return result
 
 
 def clipboard_set(text):
@@ -513,6 +533,11 @@ def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
         if (expected_sequence is not None
                 and user32.GetClipboardSequenceNumber() != expected_sequence):
             status = "changed"
+        elif expected_sequence == 0 and (
+                rollback_kind != "empty" or _clipboard_snapshot_open()[0] != "empty"):
+            # With no advancing counter, another copy could otherwise replace
+            # the initially empty clipboard before we acquire this lock.
+            status = "changed"
         elif user32.EmptyClipboard():
             if text is None or user32.SetClipboardData(CF_UNICODETEXT, handle):
                 handle = None             # the system owns the memory now
@@ -525,6 +550,21 @@ def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
             else:
                 status = "lost"
         sequence = user32.GetClipboardSequenceNumber()  # before releasing the lock
+        if status == "written" and expected_sequence is not None and sequence == expected_sequence:
+            # On some desktops a zero counter is the fresh clipboard; on a
+            # desktop where it never advances we cannot distinguish a later
+            # user copy. Undo our swap *before* releasing the clipboard lock.
+            if user32.EmptyClipboard():
+                if rollback_kind == "empty":
+                    status = "busy"
+                elif rollback_handle and user32.SetClipboardData(CF_UNICODETEXT, rollback_handle):
+                    rollback_handle = None
+                    status = "busy"
+                else:
+                    status = "lost"
+            else:
+                status = "lost"
+            sequence = user32.GetClipboardSequenceNumber()
     finally:
         user32.CloseClipboard()
         if handle:
