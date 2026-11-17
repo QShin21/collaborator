@@ -78,8 +78,31 @@ class Win32Flow(unittest.TestCase):
         self.formats([13, 1, 7])  # Unicode followed by Windows' synthesized text formats
         self.assertEqual(self.win32._clipboard_snapshot_open(), ("text", "saved clipboard"))
 
+    def test_unicode_with_locale_captures_the_locale_bytes(self):
+        text_buffer = self.formats([13, 16, 1, 7])
+        locale_buffer = ctypes.create_string_buffer(b"\x09\x04\x00\x00")
+        self.user32.set("GetClipboardData", lambda fmt: 44 if fmt == 16 else 33)
+        self.kernel32.set("GlobalSize", lambda handle: 4 if handle == 44 else 0)
+        self.kernel32.set("GlobalLock", lambda handle: ctypes.addressof(locale_buffer if handle == 44 else text_buffer))
+        kind, value, sequence = self.win32.clipboard_capture()
+        self.assertEqual((kind, value, sequence), ("text", "saved clipboard", 1))
+        self.assertEqual(value.locale, b"\x09\x04\x00\x00")
+
+    def test_malformed_locale_is_not_borrowed(self):
+        buffer = self.formats([13, 16, 1, 7])
+        self.user32.set("GetClipboardData", lambda fmt: 44 if fmt == 16 else 33)
+        self.kernel32.set("GlobalLock", lambda handle: ctypes.addressof(buffer))
+        for size in (0, 3, 65):
+            with self.subTest(size=size):
+                self.kernel32.set("GlobalSize", lambda handle: size)
+                self.assertEqual(self.win32.clipboard_capture()[:2], ("other", None))
+        self.kernel32.set("GlobalSize", lambda handle: 4)
+        self.kernel32.set("GlobalLock", lambda handle: 0 if handle == 44 else ctypes.addressof(buffer))
+        self.assertEqual(self.win32.clipboard_capture()[:2], ("other", None))
+
     def test_rich_or_synthesized_text_is_not_destroyed(self):
-        for formats in ([13, 1, 0xC000], [0xC000, 13, 1], [1, 13], [13, 1, 16]):
+        for formats in ([13, 1, 0xC000], [0xC000, 13, 1], [1, 13],
+                        [13, 1, 16], [13, 1, 7, 16], [13, 16, 7, 1]):
             with self.subTest(formats=formats):
                 self.formats(formats)
                 self.assertEqual(self.win32._clipboard_snapshot_open(), ("other", None))
@@ -203,6 +226,92 @@ class Win32Flow(unittest.TestCase):
         self.user32.set("SetClipboardData", lambda fmt, handle: 0)
         status, sequence = self.win32.clipboard_replace_if_sequence(10, "temporary", rollback=("text", "old"))
         self.assertEqual((status, sequence, state["text"]), ("lost", 11, None))
+
+    def test_restoring_text_places_its_original_locale_after_unicode(self):
+        original = self.win32._RestorableText("original", b"\x09\x04\x00\x00")
+        state = {"sequence": 10, "placed": []}
+        self.win32._clipboard_handle = lambda text: 101 if text == "original" else 102
+        self.win32._clipboard_locale_handle = lambda text: 201 if getattr(text, "locale", None) else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+        self.user32.set("EmptyClipboard", lambda: state.update(sequence=state["sequence"] + 1) or 1)
+        self.user32.set("SetClipboardData", lambda fmt, handle: state["placed"].append((fmt, handle)) or handle)
+        status, _ = self.win32.clipboard_replace_if_sequence(10, original, rollback=("text", "temporary"))
+        self.assertEqual(status, "written")
+        self.assertEqual(state["placed"], [(13, 101), (16, 201)])
+
+    def test_failed_locale_write_rolls_back_temporary_text_under_the_lock(self):
+        original = self.win32._RestorableText("original", b"\x09\x04\x00\x00")
+        state = {"sequence": 10, "text": "temporary", "locale": None, "sets": 0}
+        self.win32._clipboard_handle = lambda text: 101 if text == "original" else 102
+        self.win32._clipboard_locale_handle = lambda text: 201 if getattr(text, "locale", None) else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+
+        def empty():
+            state.update(sequence=state["sequence"] + 1, text=None, locale=None)
+            return 1
+
+        def place(fmt, handle):
+            state["sets"] += 1
+            if fmt == 16:
+                return 0            # partial restore must not be reported as success
+            state["text"] = "original" if handle == 101 else "temporary"
+            return handle
+
+        self.user32.set("EmptyClipboard", empty)
+        self.user32.set("SetClipboardData", place)
+        status, _ = self.win32.clipboard_replace_if_sequence(10, original, rollback=("text", "temporary"))
+        self.assertEqual((status, state["text"], state["sets"]), ("busy", "temporary", 3))
+
+    def test_failed_locale_allocation_does_not_empty_the_clipboard(self):
+        original = self.win32._RestorableText("original", b"\x09\x04\x00\x00")
+        calls = []
+        self.win32._clipboard_handle = lambda text: 101
+        self.win32._clipboard_locale_handle = lambda text: 0 if getattr(text, "locale", None) else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("EmptyClipboard", lambda: calls.append("empty") or 1)
+        self.kernel32.set("GlobalFree", lambda handle: calls.append(("free", handle)) or 0)
+        status, _ = self.win32.clipboard_replace_if_sequence(10, original, rollback=("text", "temporary"))
+        self.assertEqual(status, "busy")
+        self.assertNotIn("empty", calls)
+
+    def test_failed_locale_and_failed_rollback_report_loss(self):
+        original = self.win32._RestorableText("original", b"\x09\x04\x00\x00")
+        state = {"sequence": 10, "text": "temporary"}
+        self.win32._clipboard_handle = lambda text: 101 if text == "original" else 102
+        self.win32._clipboard_locale_handle = lambda text: 201 if getattr(text, "locale", None) else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+        self.user32.set("EmptyClipboard", lambda: state.update(sequence=state["sequence"] + 1, text=None) or 1)
+        self.user32.set("SetClipboardData", lambda fmt, handle: 0 if fmt == 16 or handle == 102
+                        else state.update(text="original") or handle)
+        status, _ = self.win32.clipboard_replace_if_sequence(10, original, rollback=("text", "temporary"))
+        self.assertEqual((status, state["text"]), ("lost", None))
+
+    def test_failed_temporary_set_restores_both_original_text_and_locale(self):
+        original = self.win32._RestorableText("original", b"\x09\x04\x00\x00")
+        state = {"sequence": 10, "text": "original", "locale": b"old", "sets": 0}
+        self.win32._clipboard_handle = lambda text: 101 if text == "temporary" else 102
+        self.win32._clipboard_locale_handle = lambda text: 201 if getattr(text, "locale", None) else None
+        self.user32.set("CreateWindowExW", lambda *args: 55)
+        self.user32.set("GetClipboardSequenceNumber", lambda: state["sequence"])
+        self.user32.set("EmptyClipboard", lambda: state.update(sequence=state["sequence"] + 1, text=None, locale=None) or 1)
+
+        def place(fmt, handle):
+            state["sets"] += 1
+            if state["sets"] == 1:
+                return 0
+            if fmt == 13:
+                state["text"] = "original"
+            elif fmt == 16:
+                state["locale"] = b"old"
+            return handle
+
+        self.user32.set("SetClipboardData", place)
+        status, _ = self.win32.clipboard_replace_if_sequence(10, "temporary", rollback=("text", original))
+        self.assertEqual((status, state["text"], state["locale"], state["sets"]),
+                         ("busy", "original", b"old", 3))
 
     def test_shortcuts_are_atomic_ordered_and_cannot_include_enter(self):
         captured = []

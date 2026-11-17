@@ -80,6 +80,8 @@ kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
 kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalSize.restype = ctypes.c_size_t
 kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalUnlock.restype = wintypes.BOOL
 kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
@@ -147,7 +149,7 @@ SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x0001, 0x0002, 0x001
 HWND_TOPMOST = wintypes.HWND(-1)
 GA_ROOT = 2
 MONITOR_DEFAULTTONEAREST = 2
-CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT = 1, 7, 13
+CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT, CF_LOCALE = 1, 7, 13, 16
 GMEM_MOVEABLE = 0x0002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 INPUT_KEYBOARD, KEYEVENTF_KEYUP = 1, 0x0002
@@ -381,6 +383,15 @@ def send_keys(*chord):
 
 
 # ------------------------------------------------------------------ clipboard
+class _RestorableText(str):
+    """Unicode text with the exact CF_LOCALE payload that accompanied it."""
+
+    def __new__(cls, value, locale):
+        result = str.__new__(cls, value)
+        result.locale = locale
+        return result
+
+
 def _open_clipboard(attempts=8, owner=None):
     for _ in range(attempts):
         if user32.OpenClipboard(owner):
@@ -397,19 +408,40 @@ def _clipboard_snapshot_open():
         return "empty", None
     if count < 0:
         return "busy", None
-    # Windows synthesizes CF_TEXT and CF_OEMTEXT for CF_UNICODETEXT. Any other
-    # format (HTML, image, file list, etc.) would be destroyed by a text-only
-    # restoration, so do not borrow this clipboard. The original Unicode format
-    # must be first: reading a synthesized Unicode conversion is not a snapshot.
+    # Windows synthesizes CF_TEXT and CF_OEMTEXT for CF_UNICODETEXT and may add
+    # CF_LOCALE when the clipboard closes. Any other format (HTML, image, file
+    # list, etc.) would be destroyed by a text-only restoration, so do not
+    # borrow it. Unicode must be first: a synthesized conversion is not a copy.
     formats, previous = [], 0
     for _ in range(count):
         previous = user32.EnumClipboardFormats(previous)
         if not previous:
             return "other", None
         formats.append(previous)
-    if (formats[0] != CF_UNICODETEXT
-            or any(fmt not in (CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT) for fmt in formats)):
+    # Only the observed Unicode-first conversion order is accepted. This
+    # rejects many extra native formats, but cannot prove that CF_TEXT/OEMTEXT
+    # were synthesized rather than explicitly supplied with identical IDs.
+    if formats not in ([CF_UNICODETEXT], [CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT],
+                       [CF_UNICODETEXT, CF_LOCALE],
+                       [CF_UNICODETEXT, CF_LOCALE, CF_TEXT, CF_OEMTEXT]):
         return "other", None
+    locale = None
+    if CF_LOCALE in formats:
+        locale_handle = user32.GetClipboardData(CF_LOCALE)
+        if not locale_handle:
+            return "other", None
+        size = kernel32.GlobalSize(locale_handle)
+        # The value is an LCID DWORD. Retain any allocator padding byte-for-byte,
+        # but reject malformed/unreasonably large handles rather than truncating.
+        if not 4 <= size <= 64:
+            return "other", None
+        locale_pointer = kernel32.GlobalLock(locale_handle)
+        if not locale_pointer:
+            return "other", None
+        try:
+            locale = ctypes.string_at(locale_pointer, size)
+        finally:
+            kernel32.GlobalUnlock(locale_handle)
     handle = user32.GetClipboardData(CF_UNICODETEXT)
     if not handle:
         return "other", None
@@ -417,7 +449,8 @@ def _clipboard_snapshot_open():
     if not pointer:
         return "other", None
     try:
-        return "text", ctypes.wstring_at(pointer)
+        value = ctypes.wstring_at(pointer)
+        return "text", _RestorableText(value, locale) if locale is not None else value
     finally:
         kernel32.GlobalUnlock(handle)
 
@@ -463,6 +496,9 @@ def clipboard_diagnostic():
         result = {"open": True, "sequence": user32.GetClipboardSequenceNumber(),
                   "owner": bool(user32.GetClipboardOwner()),
                   "format_count": count, "format_ids": formats}
+        if CF_LOCALE in formats:
+            locale_handle = user32.GetClipboardData(CF_LOCALE)
+            result["locale_size"] = kernel32.GlobalSize(locale_handle) if locale_handle else 0
     finally:
         user32.CloseClipboard()
     return result
@@ -502,10 +538,7 @@ def clipboard_replace_if_sequence(sequence, text, rollback=None):
             user32.DestroyWindow(owner)
 
 
-def _clipboard_handle(text):
-    if text is None:
-        return None
-    data = text.encode("utf-16-le") + b"\x00\x00"
+def _clipboard_bytes_handle(data):
     handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
     if not handle:
         return 0
@@ -518,24 +551,55 @@ def _clipboard_handle(text):
     return handle
 
 
+def _clipboard_handle(text):
+    return None if text is None else _clipboard_bytes_handle(text.encode("utf-16-le") + b"\x00\x00")
+
+
+def _clipboard_locale_handle(text):
+    locale = getattr(text, "locale", None)
+    return None if locale is None else _clipboard_bytes_handle(locale)
+
+
 def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
     if not owner:
         return "busy", 0
     handle = _clipboard_handle(text)
-    if handle == 0:
-        return "busy", 0
+    locale_handle = _clipboard_locale_handle(text)
     rollback_kind, rollback_text = rollback if rollback is not None else (None, None)
     rollback_handle = _clipboard_handle(rollback_text) if rollback_kind == "text" else None
-    if rollback_handle == 0:
-        if handle:
-            kernel32.GlobalFree(handle)
+    rollback_locale_handle = _clipboard_locale_handle(rollback_text) if rollback_kind == "text" else None
+
+    def free_pending():
+        for pending in (handle, locale_handle, rollback_handle, rollback_locale_handle):
+            if pending:
+                kernel32.GlobalFree(pending)
+
+    if any(pending == 0 for pending in (handle, locale_handle, rollback_handle, rollback_locale_handle)):
+        free_pending()
         return "busy", 0
     if not _open_clipboard(owner=owner):
-        if handle:
-            kernel32.GlobalFree(handle)
-        if rollback_handle:
-            kernel32.GlobalFree(rollback_handle)
+        free_pending()
         return "busy", 0
+
+    def restore_original(needs_empty):
+        # Called only after this transaction has emptied/changed the clipboard,
+        # while the same lock is still held. Never claim success on partial locale.
+        nonlocal rollback_handle, rollback_locale_handle
+        if needs_empty and not user32.EmptyClipboard():
+            return "lost"
+        if rollback_kind == "empty":
+            return "busy"
+        if rollback_kind != "text" or not rollback_handle:
+            return "lost"
+        if not user32.SetClipboardData(CF_UNICODETEXT, rollback_handle):
+            return "lost"
+        rollback_handle = None
+        if rollback_locale_handle:
+            if not user32.SetClipboardData(CF_LOCALE, rollback_locale_handle):
+                return "lost"
+            rollback_locale_handle = None
+        return "busy"
+
     status, sequence = "busy", 0
     try:
         if (expected_sequence is not None
@@ -547,36 +611,22 @@ def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
             # the initially empty clipboard before we acquire this lock.
             status = "changed"
         elif user32.EmptyClipboard():
-            if text is None or user32.SetClipboardData(CF_UNICODETEXT, handle):
+            placed = text is None or bool(user32.SetClipboardData(CF_UNICODETEXT, handle))
+            if placed:
                 handle = None             # the system owns the memory now
-                status = "written"
-            elif rollback_kind == "empty":
-                status = "busy"          # the old empty clipboard is still empty
-            elif rollback_handle and user32.SetClipboardData(CF_UNICODETEXT, rollback_handle):
-                rollback_handle = None  # the original text is back
-                status = "busy"
-            else:
-                status = "lost"
+                if locale_handle:
+                    placed = bool(user32.SetClipboardData(CF_LOCALE, locale_handle))
+                    if placed:
+                        locale_handle = None
+            status = "written" if placed else restore_original(needs_empty=handle is None)
         sequence = user32.GetClipboardSequenceNumber()  # before releasing the lock
         if status == "written" and expected_sequence is not None and sequence == expected_sequence:
             # On some desktops a zero counter is the fresh clipboard; on a
             # desktop where it never advances we cannot distinguish a later
             # user copy. Undo our swap *before* releasing the clipboard lock.
-            if user32.EmptyClipboard():
-                if rollback_kind == "empty":
-                    status = "busy"
-                elif rollback_handle and user32.SetClipboardData(CF_UNICODETEXT, rollback_handle):
-                    rollback_handle = None
-                    status = "busy"
-                else:
-                    status = "lost"
-            else:
-                status = "lost"
+            status = restore_original(needs_empty=True)
             sequence = user32.GetClipboardSequenceNumber()
     finally:
         user32.CloseClipboard()
-        if handle:
-            kernel32.GlobalFree(handle)
-        if rollback_handle:
-            kernel32.GlobalFree(rollback_handle)
+        free_pending()
     return status, sequence

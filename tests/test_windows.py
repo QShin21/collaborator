@@ -166,21 +166,29 @@ class StandInWindow(unittest.TestCase):
             kind, saved, sequence = self.win32.clipboard_capture()
         self.assertIn(kind, ("empty", "text"),
                       f"cannot replace a clipboard that cannot be restored: {self.win32.clipboard_diagnostic()}")
-        swapped, _ = self.win32.clipboard_replace_if_sequence(
+        swapped, prefill_write_sequence = self.win32.clipboard_replace_if_sequence(
             sequence, "clipboard before", rollback=(kind, saved))
         self.assertEqual(swapped, "written", self.win32.clipboard_diagnostic())
-        prefill_diagnostic = self.win32.clipboard_diagnostic()
         try:
+            prefill_diagnostic = self.win32.clipboard_diagnostic()
+            prefill_kind, prefill_text, _ = self.win32.clipboard_capture()
+            self.assertTrue(prefill_kind == "text" and prefill_text == "clipboard before",
+                            f"test clipboard unreadable after setup: {prefill_diagnostic}")
+            prefill_locale = getattr(prefill_text, "locale", None)
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
             actual = self.snapshot().draft
-            current_clip = self.win32.clipboard_snapshot()
+            current_kind, current_text, _ = self.win32.clipboard_capture()
+            clipboard_restored = (current_kind == "text" and current_text == "clipboard before"
+                                  and getattr(current_text, "locale", None) == prefill_locale)
             if not ok:
                 self.fail(f"{why}; draft_match={actual == 'pasted 文本'}; "
-                          f"clipboard_restored={current_clip == ('text', 'clipboard before')}; "
-                          f"clipboard_kind={current_clip[0]}; "
+                          f"clipboard_restored={clipboard_restored}; "
+                          f"clipboard_kind={current_kind}; "
+                          f"write_sequence={prefill_write_sequence}; "
                           f"before={prefill_diagnostic}; after={self.win32.clipboard_diagnostic()}")
             self.assertEqual(actual, "pasted 文本")
-            self.assertEqual(current_clip, ("text", "clipboard before"))
+            self.assertTrue(clipboard_restored,
+                            f"text or locale was not restored: {self.win32.clipboard_diagnostic()}")
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "")
             self.assertTrue(ok, why)
             self.assertEqual(self.snapshot().draft, "")
