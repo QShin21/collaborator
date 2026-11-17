@@ -17,10 +17,11 @@
 ## 2. v0.3.0 的现状（2026-11-17）
 
 开发与本地测试环境是 **Linux**：没有 Windows、Codex 或模型密钥。
-第九次 Windows CI 已跑完 416 项单测并通过（8 项跳过，包括单独运行的 5 项替身窗口用例），必需自检通过；
-另跑的 9 项原生窗口检查全部通过，包括独立 Ctrl+A 契约和粘贴/剪贴板复原，见 [EV-2026-009](evidence/EV-2026-009.md)。
+第九、十次 Windows CI 均跑完 416 项单测并通过（8 项跳过，包括单独运行的 5 项替身窗口用例），必需自检通过；
+另跑的 9 项原生窗口检查全部通过，包括独立 Ctrl+A 契约和粘贴/剪贴板复原，见 [EV-2026-009](evidence/EV-2026-009.md)、[EV-2026-010](evidence/EV-2026-010.md)。
+同一提交的发布流程、打包后必需自检和资产校验也通过，v0.3.0 已作为 Windows 预览版发布，见 [EV-2026-011](evidence/EV-2026-011.md)。
 
-**一句话：Windows 运行器上的基本调用和原生替身读取、回填已有 E2；打包尚待运行，真实 Codex、真实模型及用户试用仍未验证。**
+**一句话：Windows 运行器上的基本调用、原生替身读取/回填及打包自检已有 E2；真实 Codex、真实模型及用户试用仍未验证。**
 
 - **第一次 Windows CI 运行（提交 ca3ec234）没有通过**：测试进程在第 307 个用例处被 Tcl 中止，详见
   [EV-2026-001](evidence/EV-2026-001.md)。暴露的三个问题在第二次运行中未再出现。
@@ -48,7 +49,7 @@
 - 那次运行里，Tk 界面的 11 个屏幕用例和真实 DPAPI 的往返在 Windows 上通过了；这是一次失败运行里的观察，不算 E2。
 - 第九次运行中 `test_windows` 的基本调用、自检、替身窗口读取、ValuePattern 回填、粘贴及剪贴板复原均通过。
   非激活浮窗、托盘的完整交互仍没有 Windows 上的证据。
-- 发布工作流（打包、打包后自检）**从未运行**。
+- 发布工作流在提交 35ac88a 上通过：PyInstaller 打包、打包后的 `tk,win32,uia` 必需自检，以及 zip/校验和核验均成功，见 [EV-2026-011](evidence/EV-2026-011.md)。
 - 没有任何一步在真实的 Codex 窗口、真实的 App Server、真实的会话文件上运行过。
 - 没有任何真实模型的输出被看过；替身模型是模板加关键词规则。
 
@@ -62,7 +63,7 @@
 | --- | --- | --- | --- | --- |
 | M0-01 | 更名为伴行 | 已实现 | E1 | 包 `banxing/`、环境变量 `BANXING_*`、数据目录 `%APPDATA%\Banxing`、产物 `Banxing.exe`；全部测试在新名字下通过 |
 | M0-02 | 旧代码处置 | 已归档 | — | `collab/ eval/ prompts/ web/` 移到 `legacy/v0.1/`（按决定保留，不删除）；占位的 `tests/test_eval.py` 已去掉 |
-| M0-03 | Windows CI 与替身回填 | **已通过 Windows 运行器检查** | E2，达到该项退出条件 | [EV-2026-009](evidence/EV-2026-009.md)；常规 416 项、必需自检、单独原生窗口 9 项通过；真实 Codex 仍 E0 |
+| M0-03 | Windows CI 与替身回填 | **已通过 Windows 运行器检查** | E2，达到该项退出条件 | [EV-2026-009](evidence/EV-2026-009.md)、[EV-2026-010](evidence/EV-2026-010.md)；常规 416 项、必需自检、单独原生窗口 9 项通过；真实 Codex 仍 E0 |
 | M0-04 | 密码框与输入框特征 | 已实现 | E1 | `tests/test_routes.py`（特征、回放）；真机见 A9 |
 | M0-05 | 界面树访问减负 | 部分实现 | E1（轮询分层）/ E0（UIA 侧的退避与按需扫描） | `poll_interval` 有测试；`uia.py` 里的搜索退避、选中项扫描降频没有离线测试，也没运行过 |
 | M0-06 | 看门狗与超时 | 已实现 | E1 | `tests/test_companion.py::FailuresAndStalls` |
@@ -121,8 +122,8 @@ M3、M4、M5 的全部工作包**未开始**（方案 8.3 的停手线）。
 | Tk 解释器的线程归属与释放 | E1 + Windows 单测通过 | `tests/test_tk_lifecycle.py` 11 项在第二次 Windows CI 通过；没有再发生 Tcl 中止 |
 | DPAPI | E1 + Windows 往返通过 | 第二次 Windows CI 通过真实 DPAPI 往返；故障路径仍只模拟过 |
 | Win32 封装、UI Automation 客户端、非激活浮窗、托盘 | 基本调用及原生替身 E2；浮窗/托盘完整交互 E0 | 第九次运行器检查的基本调用、自检、替身读取、ValuePattern 写入、Ctrl+A 与粘贴/剪贴板复原通过（[EV-2026-009](evidence/EV-2026-009.md)）；不代表真实 Codex |
-| Windows CI | E2，运行器检查通过 | 第九次运行主任务及 informational 替身步骤本身均成功（[EV-2026-009](evidence/EV-2026-009.md)），不是仅依据工作流总状态 |
-| 打包、发布工作流 | **E0** | 从未运行 |
+| Windows CI | E2，运行器检查通过 | 第九、十次运行主任务及 informational 替身步骤本身均成功（[EV-2026-009](evidence/EV-2026-009.md)、[EV-2026-010](evidence/EV-2026-010.md)），不是仅依据工作流总状态 |
+| 打包、发布工作流 | E2 | Windows 运行器原生替身必需检查、PyInstaller 打包、打包后必需自检通过；发布为 pre-release，zip/校验和/公开 digest 一致（[EV-2026-011](evidence/EV-2026-011.md)） |
 | 真实 Codex 窗口上的一切 | **E0** | 见 [`acceptance.md`](acceptance.md) |
 | 真实模型的路线质量、可发判断、关键情况判断、条件保留 | **E0** | 需要密钥，见第 6 节 |
 | 目标用户能否看懂、选得了、接得住 | **E0** | 本轮不开展真人研究 |
@@ -217,6 +218,15 @@ Unicode 正文、格式和 locale 才认领新序号；粘贴前及复原前再�
 单独的 9 项原生窗口检查全部通过，没有跳过。新增 Ctrl+A 契约在注入前后都把选区折叠，
 后续粘贴用例必须自己全选、替换中文文本并确认剪贴板正文与 locale 复原。真实 Codex 仍 E0。
 
+### 发布提交的复核与 Windows 预览发布（2026-11-17，提交 35ac88a）
+
+第十次 CI 再次通过相同的 416 项常规测试、必需自检及单独原生窗口 9 项，见 [EV-2026-010](evidence/EV-2026-010.md)。
+随后发布工作流把原生替身测试作为必需步骤通过，完成打包；冻结后的 `Banxing.exe` 报告 `version=0.3.0`、
+`frozen=true`、`ok=true`、`failed_required=[]`。v0.3.0 的 tag 指向该提交，Release 为公开 pre-release。
+下载构建产物后核对：内层 Windows zip 的 SHA256 与随附校验和及 Release 公开 digest 三者相同，
+压缩包 CRC、exe 和必需随包文件检查通过，详见 [EV-2026-011](evidence/EV-2026-011.md)。
+浏览器直接下载未完成；本次内容检查使用的是同一工作流的 artifact，并以公开资产 digest 核验字节一致性。
+
 ## 5. 写在代码里的假设
 
 全部集中在 `banxing/hosts/profile.py` 和 `banxing/context/`，可以单独调整；校准的作用就是逐条检验它们。
@@ -234,7 +244,6 @@ Unicode 正文、格式和 locale 才认领新序号；粘贴前及复原前再�
 
 | 要补的 | 等级 | 谁 | 怎么做 |
 | --- | --- | --- | --- |
-| Windows 打包及打包后自检 | E2 | 协调方 | 原生替身已通过；发布流程把该检查设为必需，打包后运行 `--selftest --require tk,win32,uia`，再核对 zip、校验和及预览状态 |
 | 校准向导在真实 Codex 上的结果 | E3 | 有 Windows + Codex 的人 | [`acceptance.md`](acceptance.md) 第 1 部分；导出证据包，按 [`evidence/TEMPLATE.md`](evidence/TEMPLATE.md) 记一份 |
 | A1–A11 计数验收 | E3 | 同上 | [`acceptance.md`](acceptance.md) 第 2 部分 |
 | 第一份真机结构录制进夹具 | E3→E1 | 实现者 | 把证据包里的 `structure.json` 放进 `tests/fixtures/` 并加一条回放测试 |
