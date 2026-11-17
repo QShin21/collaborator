@@ -84,6 +84,13 @@ class Win32Flow(unittest.TestCase):
                 self.formats(formats)
                 self.assertEqual(self.win32._clipboard_snapshot_open(), ("other", None))
 
+    def test_clipboard_diagnostic_lists_formats_without_content(self):
+        self.formats([13, 1, 7, 16], "secret clipboard content")
+        report = self.win32.clipboard_diagnostic()
+        self.assertEqual(report["format_ids"], [13, 1, 7, 16])
+        self.assertEqual(report["format_count"], 4)
+        self.assertNotIn("secret clipboard content", repr(report))
+
     def test_an_initial_empty_zero_change_counter_can_be_captured(self):
         self.user32.set("CountClipboardFormats", lambda: 0)
         self.user32.set("GetClipboardSequenceNumber", lambda: 0)

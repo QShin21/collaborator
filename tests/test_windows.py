@@ -169,12 +169,16 @@ class StandInWindow(unittest.TestCase):
         swapped, _ = self.win32.clipboard_replace_if_sequence(
             sequence, "clipboard before", rollback=(kind, saved))
         self.assertEqual(swapped, "written", self.win32.clipboard_diagnostic())
+        prefill_diagnostic = self.win32.clipboard_diagnostic()
         try:
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
             actual = self.snapshot().draft
             current_clip = self.win32.clipboard_snapshot()
-            self.assertTrue(ok, f"{why}; draft_match={actual == 'pasted 文本'}; "
-                                f"clipboard_restored={current_clip == ('text', 'clipboard before')}")
+            if not ok:
+                self.fail(f"{why}; draft_match={actual == 'pasted 文本'}; "
+                          f"clipboard_restored={current_clip == ('text', 'clipboard before')}; "
+                          f"clipboard_kind={current_clip[0]}; "
+                          f"before={prefill_diagnostic}; after={self.win32.clipboard_diagnostic()}")
             self.assertEqual(actual, "pasted 文本")
             self.assertEqual(current_clip, ("text", "clipboard before"))
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "")

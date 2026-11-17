@@ -446,15 +446,23 @@ def clipboard_snapshot():
 
 def clipboard_diagnostic():
     """Content-free detail for a failed live compatibility check."""
-    result = {"sequence": user32.GetClipboardSequenceNumber(),
-              "owner": bool(user32.GetClipboardOwner())}
     if not _open_clipboard(attempts=1):
-        result.update(open=False, error=ctypes.get_last_error())
-        return result
+        error = ctypes.get_last_error()  # preserve it before calling other APIs
+        return {"open": False, "error": error,
+                "sequence": user32.GetClipboardSequenceNumber(),
+                "owner": bool(user32.GetClipboardOwner())}
     try:
         count = user32.CountClipboardFormats()
-        result.update(open=True, formats=count,
-                      first_format=user32.EnumClipboardFormats(0) if count > 0 else 0)
+        formats = []
+        previous = 0
+        for _ in range(max(0, count)):
+            previous = user32.EnumClipboardFormats(previous)
+            if not previous:
+                break
+            formats.append(previous)
+        result = {"open": True, "sequence": user32.GetClipboardSequenceNumber(),
+                  "owner": bool(user32.GetClipboardOwner()),
+                  "format_count": count, "format_ids": formats}
     finally:
         user32.CloseClipboard()
     return result
