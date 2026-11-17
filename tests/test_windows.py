@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import unittest
+from ctypes import wintypes
 from pathlib import Path
 
 import safety  # noqa: F401  (keeps tests away from real user data)
@@ -133,6 +134,48 @@ class StandInWindow(unittest.TestCase):
     def key(self, snap):
         return (snap.window_id, snap.chat_key, snap.box_id)
 
+    def keyboard_diagnostic(self, snap, actual):
+        """Only focus/selection facts, never draft or clipboard text."""
+        result = {"draft_unchanged": actual == snap.draft,
+                  "draft_empty": actual == "", "draft_length": len(actual or ""),
+                  "foreground_target": self.win32.foreground_window() == self.hwnd}
+        try:
+            focused = self.client._uia.GetFocusedElement()
+            result["uia_box_focused"] = bool(self.client._uia.CompareElements(focused, self.client._box))
+            native_box = int(self.client._box.CurrentNativeWindowHandle or 0)
+            result["native_box_handle"] = bool(native_box)
+
+            class GuiThreadInfo(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                            ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                            ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                            ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                            ("rcCaret", wintypes.RECT)]
+
+            user32 = self.win32.user32
+            user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GuiThreadInfo)]
+            user32.GetGUIThreadInfo.restype = wintypes.BOOL
+            info = GuiThreadInfo()
+            info.cbSize = ctypes.sizeof(info)
+            thread_id = user32.GetWindowThreadProcessId(self.hwnd, None)
+            result["thread_lookup_ok"] = bool(thread_id)
+            if thread_id:
+                result["gui_query_ok"] = bool(user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)))
+                if result["gui_query_ok"]:
+                    result["gui_focus_root_target"] = self.win32.top_level(info.hwndFocus) == self.hwnd
+                    result["gui_focus_is_native_box"] = bool(native_box and info.hwndFocus == native_box)
+                else:
+                    result["gui_error"] = ctypes.get_last_error()
+            pattern = self.client._text_pattern(self.client._box)
+            if pattern is not None:
+                selection = pattern.GetSelection()
+                result["selection_count"] = int(selection.Length)
+                if selection.Length:
+                    result["selection_length"] = len(selection.GetElement(0).GetText(-1))
+        except Exception as error:
+            result["probe_error"] = type(error).__name__
+        return result
+
     def test_1_draft_is_read_with_identity_and_geometry(self):
         snap = self.snapshot()
         self.assertEqual(snap.draft, "stand-in draft 12345")
@@ -176,7 +219,10 @@ class StandInWindow(unittest.TestCase):
                             f"test clipboard unreadable after setup: {prefill_diagnostic}")
             prefill_locale = getattr(prefill_text, "locale", None)
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
-            actual = self.snapshot().draft
+            # Read this owned stand-in box directly: snapshot() would bring its
+            # window forward again and conceal a focus loss during SendInput.
+            actual = self.client._read(self.client._box)
+            keyboard = self.keyboard_diagnostic(snap, actual)
             current_kind, current_text, _ = self.win32.clipboard_capture()
             clipboard_restored = (current_kind == "text" and current_text == "clipboard before"
                                   and getattr(current_text, "locale", None) == prefill_locale)
@@ -185,8 +231,9 @@ class StandInWindow(unittest.TestCase):
                           f"clipboard_restored={clipboard_restored}; "
                           f"clipboard_kind={current_kind}; "
                           f"write_sequence={prefill_write_sequence}; "
+                          f"keyboard={keyboard}; "
                           f"before={prefill_diagnostic}; after={self.win32.clipboard_diagnostic()}")
-            self.assertEqual(actual, "pasted 文本")
+            self.assertTrue(actual == "pasted 文本", f"draft changed after paste; length={len(actual or '')}")
             self.assertTrue(clipboard_restored,
                             f"text or locale was not restored: {self.win32.clipboard_diagnostic()}")
             ok, why = self.client._fill_paste(self.hwnd, self.client._box, "")
