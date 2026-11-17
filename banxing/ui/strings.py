@@ -116,6 +116,8 @@ STRINGS = {
     "ask_yes": ("好，少一些", "Yes, less"),
     "ask_no": ("保持现在这样", "Keep as it is"),
     "notice_restored": ("已恢复原草稿。", "Your original draft is back."),
+    "notice_clipboard_restore": ("回填已完成，但剪贴板未能恢复；请检查剪贴板内容。",
+                                 "The fill finished, but the clipboard could not be restored. Check its contents."),
     "notice_restore_unavailable": ("输入框里的内容已经变了，没有改动它。", "The input box has changed, so nothing was touched."),
     "notice_restore_failed": ("没能恢复原草稿，输入框未被改动。", "Could not restore the draft. The input box was left alone."),
     "notice_nothing": ("这份草稿原样发给 Codex 就可以。", "This draft is ready to send to Codex as it is."),
@@ -135,6 +137,9 @@ STRINGS = {
     "offer_clipboard_busy": ("剪贴板里有无法保留的内容，没有回填。可以复制这条提示词（会替换剪贴板）。",
                              "The clipboard holds something that could not be kept, so nothing was filled. "
                              "Copy the prompt instead (this replaces the clipboard)."),
+    "offer_clipboard_restore": ("没能恢复原剪贴板；请先检查剪贴板和输入框，再决定是否复制提示词。",
+                                "The original clipboard could not be restored. Check the clipboard and input box "
+                                "before deciding whether to copy the prompt."),
     "offer_keys_held": ("检测到正按着修饰键，没有回填。松开后可再点一次，或复制提示词。",
                         "A modifier key was held down, so nothing was filled. Release it and click again, or copy."),
     "offer_copy": ("复制提示词", "Copy the prompt"),

@@ -15,6 +15,7 @@ if sys.platform != "win32":
     raise ImportError("banxing.hosts.win32 is only available on Windows")
 
 import ctypes
+import logging
 import os
 import time
 from ctypes import wintypes
@@ -65,6 +66,9 @@ user32.OpenClipboard.restype = wintypes.BOOL
 user32.CloseClipboard.restype = wintypes.BOOL
 user32.EmptyClipboard.restype = wintypes.BOOL
 user32.CountClipboardFormats.restype = ctypes.c_int
+user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+user32.EnumClipboardFormats.restype = wintypes.UINT
+user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
 user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = [wintypes.UINT]
@@ -142,7 +146,7 @@ SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x0001, 0x0002, 0x001
 HWND_TOPMOST = wintypes.HWND(-1)
 GA_ROOT = 2
 MONITOR_DEFAULTTONEAREST = 2
-CF_UNICODETEXT = 13
+CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT = 1, 7, 13
 GMEM_MOVEABLE = 0x0002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 INPUT_KEYBOARD, KEYEVENTF_KEYUP = 1, 0x0002
@@ -333,12 +337,46 @@ def _key(vk, up=False):
     return item
 
 
-def send_keys(*chord):
-    """Press the keys in order and release them in reverse, e.g. send_keys(VK_CONTROL, VK_V).
-    Enter is never sent by this module: the pet must not send a message."""
-    events = [_key(vk) for vk in chord] + [_key(vk, up=True) for vk in reversed(chord)]
+def send_shortcuts(*chords):
+    """Inject complete shortcuts in one batch, with no gap for another keystroke.
+
+    A failed SendInput is reported, not mistaken for a successful paste. This
+    helper deliberately accepts only the three editor actions we use; it can
+    never synthesize Enter or an arbitrary key supplied by a caller.
+    """
+    allowed = ((VK_CONTROL, VK_A), (VK_CONTROL, VK_V), (VK_DELETE,))
+    if not chords or any(tuple(chord) not in allowed for chord in chords):
+        raise ValueError("unsupported shortcut")
+    events = []
+    for chord in chords:
+        events.extend(_key(vk) for vk in chord)
+        events.extend(_key(vk, up=True) for vk in reversed(chord))
     array = (INPUT * len(events))(*events)
-    return user32.SendInput(len(events), array, ctypes.sizeof(INPUT)) == len(events)
+    inserted = user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
+    if inserted == len(events):
+        return True
+    if 0 < inserted < len(events):
+        # If Windows accepted only a prefix, release exactly the keys that our
+        # prefix left down. Never re-send the destructive shortcut itself.
+        held = []
+        for event in events[:inserted]:
+            vk = event.ki.wVk
+            if event.ki.dwFlags & KEYEVENTF_KEYUP:
+                if vk in held:
+                    held.remove(vk)
+            else:
+                held.append(vk)
+        if held:
+            releases = [_key(vk, up=True) for vk in reversed(held)]
+            cleanup = (INPUT * len(releases))(*releases)
+            if user32.SendInput(len(releases), cleanup, ctypes.sizeof(INPUT)) != len(releases):
+                logging.getLogger(__name__).warning("partial SendInput left a key-release unconfirmed")
+    return False
+
+
+def send_keys(*chord):
+    """One permitted editor shortcut (kept for existing callers)."""
+    return send_shortcuts(chord)
 
 
 # ------------------------------------------------------------------ clipboard
@@ -350,28 +388,56 @@ def _open_clipboard(attempts=8, owner=None):
     return False
 
 
-def clipboard_snapshot():
+def _clipboard_snapshot_open():
     """("empty", None) | ("text", str) | ("other", None) | ("busy", None).
     "other" means the clipboard holds something that could not be put back."""
-    if not _open_clipboard():
+    count = user32.CountClipboardFormats()
+    if count == 0:
+        return "empty", None
+    if count < 0:
         return "busy", None
+    # Windows synthesizes CF_TEXT and CF_OEMTEXT for CF_UNICODETEXT. Any other
+    # format (HTML, image, file list, etc.) would be destroyed by a text-only
+    # restoration, so do not borrow this clipboard. The original Unicode format
+    # must be first: reading a synthesized Unicode conversion is not a snapshot.
+    formats, previous = [], 0
+    for _ in range(count):
+        previous = user32.EnumClipboardFormats(previous)
+        if not previous:
+            return "other", None
+        formats.append(previous)
+    if (formats[0] != CF_UNICODETEXT
+            or any(fmt not in (CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT) for fmt in formats)):
+        return "other", None
+    handle = user32.GetClipboardData(CF_UNICODETEXT)
+    if not handle:
+        return "other", None
+    pointer = kernel32.GlobalLock(handle)
+    if not pointer:
+        return "other", None
     try:
-        if user32.CountClipboardFormats() == 0:
-            return "empty", None
-        if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
-            return "other", None
-        handle = user32.GetClipboardData(CF_UNICODETEXT)
-        if not handle:
-            return "other", None
-        pointer = kernel32.GlobalLock(handle)
-        if not pointer:
-            return "other", None
-        try:
-            return "text", ctypes.wstring_at(pointer)
-        finally:
-            kernel32.GlobalUnlock(handle)
+        return "text", ctypes.wstring_at(pointer)
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+
+def clipboard_capture():
+    """Read content and its change counter under the same clipboard lock."""
+    if not _open_clipboard():
+        return "busy", None, 0
+    try:
+        kind, text = _clipboard_snapshot_open()
+        sequence = user32.GetClipboardSequenceNumber()
+        # Without a usable change counter we could overwrite a new user copy
+        # while restoring. No automatic paste is worth that ambiguity.
+        return ("busy", None, 0) if not sequence else (kind, text, sequence)
     finally:
         user32.CloseClipboard()
+
+
+def clipboard_snapshot():
+    kind, text, _ = clipboard_capture()
+    return kind, text
 
 
 def clipboard_set(text):
@@ -383,32 +449,86 @@ def clipboard_set(text):
     """
     owner = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, None, None, None, None)
     try:
-        return _clipboard_write(owner, text)
+        return _clipboard_write(owner, text)[0] == "written"
     finally:
         if owner:
             user32.DestroyWindow(owner)
 
 
-def _clipboard_write(owner, text):
-    if not _open_clipboard(owner=owner):
-        return False
+def clipboard_replace_if_sequence(sequence, text, rollback=None):
+    """Replace only our own temporary clipboard value, never a newer user copy.
+
+    ``rollback`` is the previously captured (kind, text). It is preallocated
+    too, so if placing the new value fails after EmptyClipboard, the old value
+    can be put back while still holding the clipboard lock.
+
+    Returns (written | changed | busy | lost, new sequence number). ``lost``
+    means even the rollback failed and must be reported to the user. The
+    comparison, write and returned sequence share one clipboard lock.
+    """
+    owner = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, None, None, None, None)
     try:
-        user32.EmptyClipboard()
-        if text is None:
-            return True
-        data = text.encode("utf-16-le") + b"\x00\x00"
-        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-        if not handle:
-            return False
-        pointer = kernel32.GlobalLock(handle)
-        if not pointer:
+        return _clipboard_write(owner, text, sequence, rollback)
+    finally:
+        if owner:
+            user32.DestroyWindow(owner)
+
+
+def _clipboard_handle(text):
+    if text is None:
+        return None
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not handle:
+        return 0
+    pointer = kernel32.GlobalLock(handle)
+    if not pointer:
+        kernel32.GlobalFree(handle)
+        return 0
+    ctypes.memmove(pointer, data, len(data))
+    kernel32.GlobalUnlock(handle)
+    return handle
+
+
+def _clipboard_write(owner, text, expected_sequence=None, rollback=None):
+    if not owner:
+        return "busy", 0
+    handle = _clipboard_handle(text)
+    if handle == 0:
+        return "busy", 0
+    rollback_kind, rollback_text = rollback if rollback is not None else (None, None)
+    rollback_handle = _clipboard_handle(rollback_text) if rollback_kind == "text" else None
+    if rollback_handle == 0:
+        if handle:
             kernel32.GlobalFree(handle)
-            return False
-        ctypes.memmove(pointer, data, len(data))
-        kernel32.GlobalUnlock(handle)
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+        return "busy", 0
+    if not _open_clipboard(owner=owner):
+        if handle:
             kernel32.GlobalFree(handle)
-            return False
-        return True                    # the system owns the memory now
+        if rollback_handle:
+            kernel32.GlobalFree(rollback_handle)
+        return "busy", 0
+    status, sequence = "busy", 0
+    try:
+        if (expected_sequence is not None
+                and user32.GetClipboardSequenceNumber() != expected_sequence):
+            status = "changed"
+        elif user32.EmptyClipboard():
+            if text is None or user32.SetClipboardData(CF_UNICODETEXT, handle):
+                handle = None             # the system owns the memory now
+                status = "written"
+            elif rollback_kind == "empty":
+                status = "busy"          # the old empty clipboard is still empty
+            elif rollback_handle and user32.SetClipboardData(CF_UNICODETEXT, rollback_handle):
+                rollback_handle = None  # the original text is back
+                status = "busy"
+            else:
+                status = "lost"
+        sequence = user32.GetClipboardSequenceNumber()  # before releasing the lock
     finally:
         user32.CloseClipboard()
+        if handle:
+            kernel32.GlobalFree(handle)
+        if rollback_handle:
+            kernel32.GlobalFree(rollback_handle)
+    return status, sequence

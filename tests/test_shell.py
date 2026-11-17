@@ -67,9 +67,10 @@ class SourceTests(unittest.TestCase):
         """A guard on the one file that presses keys: no Enter, anywhere."""
         text = (ROOT / "banxing" / "hosts" / "win32.py").read_text(encoding="utf-8")
         self.assertNotRegex(text, r"VK_RETURN|0x0D\b|VK_ENTER")
+        self.assertIn("allowed = ((VK_CONTROL, VK_A), (VK_CONTROL, VK_V), (VK_DELETE,))", text)
         uia = (ROOT / "banxing" / "hosts" / "uia.py").read_text(encoding="utf-8")
-        sent = set(re.findall(r"send_keys\(([^)]*)\)", uia))
-        self.assertEqual(sent, {"win32.VK_CONTROL, win32.VK_A", "win32.VK_CONTROL, win32.VK_V", "win32.VK_DELETE"})
+        self.assertNotIn("win32.send_keys(", uia)
+        self.assertEqual(uia.count("win32.send_shortcuts("), 2)
 
 
 class DocumentTests(unittest.TestCase):
@@ -330,7 +331,7 @@ class ViewModelTests(RigCase):
         for kind in kinds:
             self.assertTrue(viewmodel.notice_text(kind, "timeout"), kind)
         self.assertEqual(viewmodel.notice_text("nothing", "图纸已确认。"), "图纸已确认。")
-        for reason in ("mismatch", "failed", "clipboard_busy", "keys_held", "focus", "error"):
+        for reason in ("mismatch", "failed", "clipboard_busy", "clipboard_restore", "keys_held", "focus", "error"):
             self.assertTrue(viewmodel.offer_text(reason))
 
     def test_menu_reflects_the_state(self):

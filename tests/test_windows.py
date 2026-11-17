@@ -43,6 +43,8 @@ class WindowsBasics(unittest.TestCase):
         area = win32.work_area(win32.foreground_window() or 0)
         self.assertGreater(area.width, 200)
         self.assertGreater(area.height, 200)
+        with self.assertRaises(ValueError):
+            win32.send_shortcuts((0x0D,))  # never permit Enter, even from a caller
 
     def test_single_instance_mutex(self):
         from banxing.hosts import win32
@@ -157,16 +159,37 @@ class StandInWindow(unittest.TestCase):
 
     def test_3_paste_path_fills_and_puts_the_clipboard_back(self):
         snap = self.snapshot()
-        self.assertTrue(self.win32.clipboard_set("clipboard before"))
-        ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
-        self.assertTrue(ok, why)
-        self.assertEqual(self.snapshot().draft, "pasted 文本")
-        time.sleep(0.3)
-        self.assertEqual(self.win32.clipboard_snapshot(), ("text", "clipboard before"))
-        ok, why = self.client._fill_paste(self.hwnd, self.client._box, "")
-        self.assertTrue(ok, why)
-        self.assertEqual(self.snapshot().draft, "")
-        self.client._fill_value(self.client._box, snap.draft)
+        kind, saved, sequence = self.win32.clipboard_capture()
+        self.assertIn(kind, ("empty", "text"), "cannot replace a clipboard that cannot be restored")
+        swapped, _ = self.win32.clipboard_replace_if_sequence(
+            sequence, "clipboard before", rollback=(kind, saved))
+        self.assertEqual(swapped, "written")
+        try:
+            ok, why = self.client._fill_paste(self.hwnd, self.client._box, "pasted 文本")
+            actual = self.snapshot().draft
+            current_clip = self.win32.clipboard_snapshot()
+            self.assertTrue(ok, f"{why}; draft_match={actual == 'pasted 文本'}; "
+                                f"clipboard_restored={current_clip == ('text', 'clipboard before')}")
+            self.assertEqual(actual, "pasted 文本")
+            self.assertEqual(current_clip, ("text", "clipboard before"))
+            ok, why = self.client._fill_paste(self.hwnd, self.client._box, "")
+            self.assertTrue(ok, why)
+            self.assertEqual(self.snapshot().draft, "")
+        finally:
+            # Only touch this test's own stand-in and clipboard, not a newer copy
+            # or a draft someone changed while the live test was in flight.
+            try:
+                current = self.client._snapshot(time.monotonic(), fresh=True)
+            except Exception:
+                current = None
+            if (current is not None and current.foreground and self.key(current) == self.key(snap)
+                    and current.draft in ("", "pasted 文本", snap.draft)):
+                self.client._fill_value(self.client._box, snap.draft)
+            current_kind, current_text, current_sequence = self.win32.clipboard_capture()
+            if (current_kind, current_text) == ("text", "clipboard before"):
+                self.win32.clipboard_replace_if_sequence(
+                    current_sequence, saved if kind == "text" else None,
+                    rollback=("text", "clipboard before"))
 
     def test_4_probe_reports_without_content(self):
         self.snapshot()

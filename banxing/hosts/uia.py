@@ -534,32 +534,59 @@ class WindowsCodexClient(CodexClient):
             return False, "failed"
         return (True, "") if self._wait_for(box, text, 0.6) else (False, "failed")
 
-    def _fill_paste(self, hwnd, box, text):
+    def _fill_paste(self, hwnd, box, text, key=None, expect=None):
         if win32.modifiers_held():
             return False, "keys_held"
-        kind, saved = win32.clipboard_snapshot()
-        if kind in ("other", "busy"):
+        kind, saved, before = (win32.clipboard_capture() if text else ("empty", None, 0))
+        if text and kind in ("other", "busy"):
             return False, "clipboard_busy"         # would destroy something that cannot be put back
         if not self._focus(hwnd, box):
             return False, "focus"
+        temporary = None
+        if text:
+            swapped, temporary = win32.clipboard_replace_if_sequence(before, text, rollback=(kind, saved))
+            if swapped != "written":
+                return False, "clipboard_restore" if swapped == "lost" else "clipboard_busy"
+        ok, why = False, "not_received"
         try:
+            if key is not None:
+                just_before = self._snapshot(time.monotonic(), fresh=True)
+                if ((just_before.window_id, just_before.chat_key, just_before.box_id) != tuple(key)
+                        or just_before.draft is None or strict(just_before.draft) != strict(expect)):
+                    why = "mismatch"
             if text:
-                if not win32.clipboard_set(text):
-                    return False, "clipboard_busy"
-                win32.send_keys(win32.VK_CONTROL, win32.VK_A)
-                time.sleep(0.05)
-                win32.send_keys(win32.VK_CONTROL, win32.VK_V)
+                if why == "mismatch":
+                    sent = False
+                elif not self._focus(hwnd, box):
+                    why = "focus"
+                    sent = False
+                elif win32.clipboard_capture()[2] != temporary:
+                    # Another copy may have arrived while focus was being set.
+                    # Never paste that content into the user's draft.
+                    why = "clipboard_busy"
+                    sent = False
+                else:
+                    sent = win32.send_shortcuts((win32.VK_CONTROL, win32.VK_A),
+                                                (win32.VK_CONTROL, win32.VK_V))
             else:
-                win32.send_keys(win32.VK_CONTROL, win32.VK_A)
-                time.sleep(0.05)
-                win32.send_keys(win32.VK_DELETE)
-            ok = self._wait_for(box, text, 1.2)
+                sent = (False if why == "mismatch" else
+                        win32.send_shortcuts((win32.VK_CONTROL, win32.VK_A), (win32.VK_DELETE,)))
+            if sent:
+                ok = self._wait_for(box, text, 1.2)
+                why = "" if ok else "not_received"
+            elif why not in ("focus", "clipboard_busy", "mismatch"):
+                why = "send_input"
         finally:
-            time.sleep(0.15)                       # let the paste finish reading the clipboard
-            win32.clipboard_set(saved if kind == "text" else None)
-        return (True, "") if ok else (False, "failed")
+            if temporary is not None:
+                time.sleep(0.15)                   # let the paste finish reading the clipboard
+                restored, _ = win32.clipboard_replace_if_sequence(
+                    temporary, saved if kind == "text" else None, rollback=("text", text))
+                if restored in ("busy", "lost"):
+                    log.warning("temporary paste clipboard could not be restored")
+                    why = "clipboard_restore"
+        return ok, why
 
-    def _write(self, hwnd, box, text):
+    def _write(self, hwnd, box, text, expect, key):
         """Try the ways of writing in the profile's order. Returns (method, reason)."""
         try:
             framework = str(box.CurrentFrameworkId or "")
@@ -567,10 +594,19 @@ class WindowsCodexClient(CodexClient):
             framework = ""
         reason = "failed"
         for method in self.profile.fill_order(framework):
-            ok, why = self._fill_value(box, text) if method == "value" else self._fill_paste(hwnd, box, text)
+            ok, why = (self._fill_value(box, text) if method == "value" else
+                       self._fill_paste(hwnd, box, text, key=key, expect=expect))
             if ok:
-                return method, ""
+                return method, why
             reason = why or reason
+            # An attempted paste may still arrive late, and a changed draft may be
+            # the user's new edit. Never start a second write in either case.
+            if method == "paste" and why not in ("keys_held", "clipboard_busy", "focus"):
+                break
+            again = self._snapshot(time.monotonic(), fresh=True)
+            if ((again.window_id, again.chat_key, again.box_id) != tuple(key)
+                    or again.draft is None or strict(again.draft) != strict(expect)):
+                break
         return "", reason
 
     def fill(self, key, expect, text):
@@ -586,20 +622,18 @@ class WindowsCodexClient(CodexClient):
                     or strict(snap.draft) != strict(expect)):
                 return FillResult(False, "mismatch")
             hwnd, box = self._hwnd, self._box
-            method, reason = self._write(hwnd, box, text)
+            method, reason = self._write(hwnd, box, text, expect, key)
             if not method:
-                # Nothing may be left half-done: either the text did land (the editor
-                # merely reformatted it), or the user's draft is put back.
-                current = self._read(box)
-                if current is not None and strict(current) != strict(expect):
-                    if text and similarity(loose(current), loose(text)) >= 0.9:
-                        method = "paste"
-                    else:
-                        self._write(hwnd, box, expect)
+                # The editor may have accepted the write but reformatted it. Do not
+                # blindly replay the old draft over a change made by the user.
+                after = self._snapshot(time.monotonic(), fresh=True)
+                same_box = (after.window_id, after.chat_key, after.box_id) == tuple(key)
+                if same_box and after.draft is not None and self._same(after.draft, text):
+                    method = "paste"
             if not method:
                 return FillResult(False, reason)
             self._focus(hwnd, box)                 # the cursor goes back to the input box
-            return FillResult(True, method=method)
+            return FillResult(True, reason=reason, method=method)
         except Exception as error:
             log.warning("fill failed: %s", error)
             return FillResult(False, "error")

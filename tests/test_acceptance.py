@@ -13,12 +13,29 @@ import safety  # noqa: F401  (keeps tests away from real user data)
 
 from banxing import examples, levels as freq, llm, mock
 from banxing.context import ContextProvider
+from banxing.hosts.base import FillResult
+from banxing.hosts.simulated import SimulatedCodex
 
 from rig import RigCase, THREAD_A, THREAD_B, write_session
 
 FURNITURE = examples.get("furniture")["draft"]
 SOFTWARE = examples.get("software")["draft"]
 OTHER = "帮我把读书笔记做成可以检索的网页，我不会编程"
+
+
+class ClipboardRestorationWarning(RigCase):
+    def test_a_successful_fill_still_warns_if_the_clipboard_could_not_be_restored(self):
+        class Warns(SimulatedCodex):
+            def fill(self, key, expect, text):
+                result = super().fill(key, expect, text)
+                return FillResult(result.ok, "clipboard_restore" if result.ok else result.reason,
+                                  result.method)
+
+        rig = self.rig(client=Warns())
+        rig.pause_on(FURNITURE)
+        rig.controller.pick(0)
+        self.assertIn("filled", rig.view.notices)
+        self.assertIn("clipboard_restore", rig.view.notices)
 
 
 class AppearsByItself(RigCase):

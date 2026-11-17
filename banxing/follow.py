@@ -657,6 +657,8 @@ class FollowMachine:
                     self.levels = lv.cancel_adopt(self.levels, record.message_id)
                     out.append(Persist())
                 out.extend([Notice("restored"), Log("restored", {"method": method})])
+                if reason == "clipboard_restore":
+                    out.append(Notice("clipboard_restore"))
             else:
                 out.append(Notice("restore_failed", reason))
             return out
@@ -676,6 +678,8 @@ class FollowMachine:
             if bubble is not None:
                 self._without_hint(out, bubble, filling.index, filling.text)
             out.append(Notice("appended"))
+            if reason == "clipboard_restore":
+                out.append(Notice("clipboard_restore"))
             return out
         if ok:
             message.fill = _FillRecord(filling.text, filling.expect, filling.message_id, counted)
@@ -690,6 +694,8 @@ class FollowMachine:
             if bubble is not None:
                 self._drop_bubble(out, "adopted")
             out.append(Notice("filled"))
+            if reason == "clipboard_restore":
+                out.append(Notice("clipboard_restore"))
             return out
         out.append(Log("fill_failed", {"reason": reason, "source": filling.source, "purpose": filling.purpose}))
         if reason == "mismatch" and bubble is not None and bubble.source in FOLLOWING:

@@ -21,7 +21,8 @@ ALL_CAPABILITIES = frozenset({READ, FILL, CHAT_KEY, SIGNALS, TURN_EVENTS, SELECT
 @dataclass(frozen=True)
 class FillResult:
     ok: bool
-    reason: str = ""      # mismatch | failed | unsupported | clipboard_busy | keys_held | focus | error
+    reason: str = ""      # mismatch | failed | unsupported | clipboard_busy | keys_held | focus |
+                          # send_input | not_received | clipboard_restore | error
     method: str = ""      # value | paste | simulated
 
 

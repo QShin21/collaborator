@@ -378,6 +378,221 @@ class UiaFlow(RigCase):
     def key_of(self, snap):
         return (snap.window_id, snap.chat_key, snap.box_id)
 
+    def paste_clipboard(self):
+        """A clipboard with a change counter, like the real Win32 wrapper."""
+        clip = {"kind": "text", "text": "saved clipboard", "sequence": 10}
+        calls = []
+        self.win32.modifiers_held = lambda: False
+        self.win32.clipboard_capture = lambda: (clip["kind"], clip["text"], clip["sequence"])
+
+        def replace(sequence, text, rollback=None):
+            calls.append((sequence, text))
+            if sequence != clip["sequence"]:
+                return "changed", clip["sequence"]
+            clip["kind"] = "text" if text is not None else "empty"
+            clip["text"] = text
+            clip["sequence"] += 1
+            return "written", clip["sequence"]
+
+        self.win32.clipboard_replace_if_sequence = replace
+        return clip, calls
+
+    def test_paste_is_one_batched_input_and_restores_the_clipboard(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+        clip, swaps = self.paste_clipboard()
+        shortcuts = []
+
+        def send(*chords):
+            shortcuts.append(chords)
+            self.world.type(clip["text"])
+            return True
+
+        self.win32.send_shortcuts = send
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "pasted 文本")
+        self.assertEqual((ok, why, self.world.draft), (True, "", "pasted 文本"))
+        self.assertEqual((clip["kind"], clip["text"]), ("text", "saved clipboard"))
+        self.assertEqual(swaps, [(10, "pasted 文本"), (11, "saved clipboard")])
+        self.assertEqual(shortcuts, [((self.win32.VK_CONTROL, self.win32.VK_A),
+                                      (self.win32.VK_CONTROL, self.win32.VK_V))])
+        self.assertEqual(snap.draft, DRAFT)  # never sent or altered the saved snapshot
+
+    def test_a_failed_key_injection_does_not_change_the_draft_or_clipboard(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+        self.win32.send_shortcuts = lambda *chords: False
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (False, "send_input", DRAFT))
+        self.assertEqual((clip["kind"], clip["text"]), ("text", "saved clipboard"))
+
+    def test_clearing_the_box_does_not_need_or_touch_the_clipboard(self):
+        self.calibrated_for_current_version()
+        self.look()
+        self.win32.modifiers_held = lambda: False
+        self.win32.clipboard_capture = lambda: self.fail("Delete must not read the clipboard")
+        self.win32.clipboard_replace_if_sequence = lambda *args: self.fail("Delete must not change the clipboard")
+        chords = []
+
+        def send(*shortcuts):
+            chords.append(shortcuts)
+            self.world.type("")
+            return True
+
+        self.win32.send_shortcuts = send
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "")
+        self.assertEqual((ok, why, self.world.draft), (True, "", ""))
+        self.assertEqual(chords, [((self.win32.VK_CONTROL, self.win32.VK_A), (self.win32.VK_DELETE,))])
+
+    def test_injected_but_not_received_does_not_replay_the_draft_or_lose_clipboard(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+        self.win32.send_shortcuts = lambda *chords: True
+        self.client._wait_for = lambda box, wanted, timeout: False
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (False, "not_received", DRAFT))
+        self.assertEqual((clip["kind"], clip["text"]), ("text", "saved clipboard"))
+
+    def test_a_new_user_copy_is_never_overwritten_by_clipboard_restoration(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+
+        def send(*chords):
+            self.world.type(clip["text"])
+            clip.update(kind="text", text="user's newer copy", sequence=clip["sequence"] + 1)
+            return True
+
+        self.win32.send_shortcuts = send
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (True, "", "new"))
+        self.assertEqual(clip["text"], "user's newer copy")
+
+    def test_a_new_copy_before_the_swap_prevents_any_input(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+        original_replace = self.win32.clipboard_replace_if_sequence
+
+        def replace(sequence, text, rollback=None):
+            clip.update(text="user's newer copy", sequence=clip["sequence"] + 1)
+            return original_replace(sequence, text, rollback)
+
+        self.win32.clipboard_replace_if_sequence = replace
+        self.win32.send_shortcuts = lambda *chords: self.fail("must not send keys")
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (False, "clipboard_busy", DRAFT))
+        self.assertEqual(clip["text"], "user's newer copy")
+
+    def test_a_clipboard_write_and_rollback_failure_never_injects_keys(self):
+        self.calibrated_for_current_version()
+        self.look()
+        self.paste_clipboard()
+        self.win32.clipboard_replace_if_sequence = lambda *args, **kwargs: ("lost", 11)
+        self.win32.send_shortcuts = lambda *args: self.fail("must not inject after clipboard loss")
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (False, "clipboard_restore", DRAFT))
+
+    def test_a_new_copy_during_focus_is_not_pasted_into_the_draft(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+        focus = self.client._focus
+        times = []
+
+        def moving_focus(hwnd, box):
+            times.append(1)
+            if len(times) == 2:
+                clip.update(text="user's newer copy", sequence=clip["sequence"] + 1)
+            return focus(hwnd, box)
+
+        self.client._focus = moving_focus
+        self.win32.send_shortcuts = lambda *chords: self.fail("must not paste the newer copy")
+        ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (False, "clipboard_busy", DRAFT))
+        self.assertEqual(clip["text"], "user's newer copy")
+
+    def test_a_failed_clipboard_restoration_is_reported_even_if_the_paste_landed(self):
+        self.calibrated_for_current_version()
+        self.look()
+        clip, _ = self.paste_clipboard()
+        original_replace = self.win32.clipboard_replace_if_sequence
+        calls = []
+
+        def replace(sequence, text, rollback=None):
+            calls.append(text)
+            return ("busy", clip["sequence"]) if len(calls) == 2 else original_replace(sequence, text, rollback)
+
+        self.win32.clipboard_replace_if_sequence = replace
+        self.win32.send_shortcuts = lambda *chords: (self.world.type(clip["text"]), True)[1]
+        with self.assertLogs(self.uia.log, level="WARNING"):
+            ok, why = self.client._fill_paste(self.win32.hwnd, self.client._box, "new")
+        self.assertEqual((ok, why, self.world.draft), (True, "clipboard_restore", "new"))
+        self.assertEqual(clip["text"], "new")
+
+    def test_a_failed_write_does_not_replay_the_saved_draft_over_a_user_edit(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+
+        def failed_value(box, text):
+            self.world.type("user edited the draft")
+            return False, "failed"
+
+        self.client._fill_value = failed_value
+        self.client._fill_paste = lambda *args: self.fail("must not retry after an edit")
+        result = self.client.fill(self.key_of(snap), DRAFT, "new prompt")
+        self.assertEqual((result.ok, result.reason, self.world.draft),
+                         (False, "failed", "user edited the draft"))
+
+    def test_an_uncertain_paste_failure_does_not_start_a_second_write(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+        self.world.box().CurrentFrameworkId = "Chrome"  # paste has priority for a rich editor
+        self.client._fill_paste = lambda *args, **kwargs: (False, "not_received")
+        self.client._fill_value = lambda *args: self.fail("must not retry an uncertain paste")
+        result = self.client.fill(self.key_of(snap), DRAFT, "new prompt")
+        self.assertEqual((result.ok, result.reason, self.world.draft), (False, "not_received", DRAFT))
+
+    def test_a_chat_switch_during_clipboard_setup_prevents_the_paste(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+        self.world.box().CurrentFrameworkId = "Chrome"
+        clip, _ = self.paste_clipboard()
+        original_replace = self.win32.clipboard_replace_if_sequence
+
+        def replace(sequence, text, rollback=None):
+            status, new_sequence = original_replace(sequence, text, rollback)
+            if text == "new prompt" and status == "written":
+                self.win32.window_title = lambda hwnd: "Another chat"
+            return status, new_sequence
+
+        self.win32.clipboard_replace_if_sequence = replace
+        self.win32.send_shortcuts = lambda *args: self.fail("must not paste into another chat")
+        result = self.client.fill(self.key_of(snap), DRAFT, "new prompt")
+        self.assertEqual((result.ok, result.reason, self.world.draft), (False, "mismatch", DRAFT))
+        self.assertEqual(clip["text"], "saved clipboard")
+
+    def test_a_user_edit_during_clipboard_setup_is_left_in_place(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+        self.world.box().CurrentFrameworkId = "Chrome"
+        clip, _ = self.paste_clipboard()
+        original_replace = self.win32.clipboard_replace_if_sequence
+
+        def replace(sequence, text, rollback=None):
+            status, new_sequence = original_replace(sequence, text, rollback)
+            if text == "new prompt" and status == "written":
+                self.world.type("the user's new draft")
+            return status, new_sequence
+
+        self.win32.clipboard_replace_if_sequence = replace
+        self.win32.send_shortcuts = lambda *args: self.fail("must not replace the new draft")
+        result = self.client.fill(self.key_of(snap), DRAFT, "new prompt")
+        self.assertEqual((result.ok, result.reason, self.world.draft),
+                         (False, "mismatch", "the user's new draft"))
+        self.assertEqual(clip["text"], "saved clipboard")
+
     def test_a_fill_on_the_calibrated_version_checks_and_writes(self):
         self.calibrated_for_current_version()
         snap = self.look()
