@@ -87,8 +87,8 @@ class DocumentTests(unittest.TestCase):
         for package in packages:
             self.assertRegex(ledger, rf"(?m)^\| {package} \|", package)
 
-    def test_nothing_published_claims_more_than_offline_evidence(self):
-        """No record of a real-device run exists yet; the papers must not sound as if one did."""
+    def test_published_evidence_distinguishes_windows_runners_from_real_codex(self):
+        """Runner E2 needs a linked record; it must never turn into a real-Codex claim."""
         # A record of a FAILED run is evidence too, and changes nothing here. Only a record
         # that itself claims a real-device level ends this check.
         records = [p.name for p in (ROOT / "docs" / "evidence").glob("EV-*.md")
@@ -103,10 +103,18 @@ class DocumentTests(unittest.TestCase):
             for claim in re.finditer(r"(?i)verified (?:on|against) a real codex", text):
                 before = text[max(0, claim.start() - 40):claim.start()]
                 self.assertRegex(before, r"(?i)\bnot\b|nobody|never", relative)
+        windows_records = {p.name for p in (ROOT / "docs" / "evidence").glob("EV-*.md")
+                           if re.search(r"(?m)^证据等级：\s*E2", p.read_text(encoding="utf-8"))}
         ledger = self.read("docs/verification.md")
         for line in ledger.splitlines():
-            if line.startswith("| M") or line.startswith("| 真实") or line.startswith("| Win32") or line.startswith("| 打包"):
+            if line.startswith("| 真实"):
                 self.assertNotRegex(line, r"\| E[2-5]\b", line[:40])
+            if line.startswith("| M") or line.startswith("| Win32") or line.startswith("| 打包") or line.startswith("| Windows CI"):
+                self.assertNotRegex(line, r"\| E[3-5]\b", line[:40])
+                if "E2" in line:
+                    linked = set(re.findall(r"evidence/(EV-\d{4}-\d+\.md)", line))
+                    self.assertTrue(linked & windows_records, f"E2 needs a linked Windows record: {line[:60]}")
+                    self.assertIn("运行器", line, "E2 must say it covers the runner, not real Codex")
 
     def test_the_old_names_are_gone_outside_the_history(self):
         old = ("desk" + "pet", "DESK" + "PET_", "AI-" + "Collaborator", "Desk" + "Pet")
