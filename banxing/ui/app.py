@@ -11,16 +11,33 @@ the window has been mapped once — Tk creates the native wrapper lazily and wou
 drop the style otherwise. Dialogs (model settings, paste, self-check) are ordinary
 windows and do take focus; that is intended.
 
-STATUS: not exercised on Windows from this development machine (no display, no
-Windows). The CI build constructs the shell and renders a bubble in its self-test;
-focus behaviour next to a real Codex window is a manual check (docs/verification.md).
+Threads. Tk belongs to ONE thread — the one that created the interpreter — for its
+whole life, including its end. Three rules follow, and PetApp keeps them itself:
+
+  * every Tk call is made on that thread; other threads (tray icon, watcher, model
+    calls) only put work into a queue that `_pump` empties;
+  * the interpreter is torn down on that thread, in `destroy()`;
+  * and it is also FREED there. Widgets, variables and callbacks refer to each other
+    in cycles, so dropping the last name does not free them: they wait for Python's
+    cycle collector, which runs on whichever thread happens to allocate next. If
+    that is the watcher or a worker, Tcl finds its interpreter being deleted by a
+    stranger and aborts the whole process ("Tcl_AsyncDelete: async handler deleted
+    by the wrong thread" — seen in the first Windows CI run, when the self-test's
+    UI Automation thread collected what the Tk check had left behind). `destroy()`
+    therefore lets go of every Tk object and collects at once (`release_tk`).
+
+STATUS: the first Windows CI run built these windows and passed the screen tests,
+then died of the fault described above; see docs/verification.md for what has run
+since. Focus behaviour next to a real Codex window is a manual check.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import queue
 import sys
+import threading
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import filedialog, messagebox
@@ -44,12 +61,37 @@ BODY = {"idle": "#4f8cff", "thinking": "#4f8cff", "error": "#4f8cff", "paused": 
 BADGE = {"error": ("#d1242f", "!"), "blind": ("#bf8700", "?"), "setup": ("#bf8700", "?")}
 
 
+def release_tk():
+    """Free Tk objects that are no longer referenced — now, on the calling thread.
+    Call it on the Tk thread after windows were destroyed (see "Threads" above).
+    Returns the number of objects the collector found."""
+    return gc.collect()
+
+
+def _holds_tk(value):
+    if isinstance(value, (tk.Misc, tk.Variable, tk.Image, tkfont.Font)):
+        return True
+    if isinstance(value, (list, tuple, set)):
+        return any(_holds_tk(item) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_tk(item) for item in value.values())
+    return False
+
+
+class WrongThread(RuntimeError):
+    """A Tk operation was asked for on a thread that does not own the interpreter."""
+
+
 class PetApp(View):
     def __init__(self, settings, store, use_tray=True):
         self.settings = settings
         self.store = store
         self.controller = None
         self.executor = None
+        self._owner = threading.get_ident()     # the only thread that may touch Tk — or end it
+        self._destroyed = False
+        self._release_pending = False
+        self._menu = None
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
@@ -161,7 +203,29 @@ class PetApp(View):
                 pass
         return Rect(0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
 
+    def owned(self):
+        """Is the calling thread the one that created (and so owns) the interpreter?"""
+        return threading.get_ident() == self._owner
+
+    def _own(self, what):
+        if not self.owned():
+            raise WrongThread(f"{what} must run on the thread that created the windows")
+
+    def _release_soon(self):
+        """A dialog or a menu was closed: free what it left behind on this thread,
+        shortly, instead of leaving it for the collector to find from another one."""
+        if self._release_pending or self._quit:
+            return
+        self._release_pending = True
+
+        def release():
+            self._release_pending = False
+            if not self._quit:
+                release_tk()
+        self.root.after(250, release)
+
     def run(self):
+        self._own("run()")
         self.root.after(40, self._pump)
         self.root.after(350, self._animate)
         self.root.mainloop()
@@ -197,21 +261,54 @@ class PetApp(View):
             self._tray_state = (self.controller.menu(), self.pet_visible)
         self.root.after(350, self._animate)
 
-    def quit(self):
-        self._quit = True
-        self._hide_toast()
-        if self._tray is not None:
+    def _stop_tray(self):
+        tray, self._tray = self._tray, None
+        if tray is not None:
             try:
-                self._tray.stop()
+                tray.stop()
             except Exception:
                 pass
+
+    def quit(self):
+        """Leave the main loop. The caller of run() then calls destroy()."""
+        if self._destroyed:
+            return
+        self._own("quit()")
+        self._quit = True
+        self._hide_toast()
+        self._stop_tray()
         self.root.quit()
 
     def destroy(self):
-        """Tear the windows down (tests and the self-test; the real run just quits)."""
+        """End the interpreter and free it — here, on the thread that owns it. After
+        this returns nothing of Tk is left for the cycle collector to stumble over on
+        another thread. Safe to call twice; refuses any other thread."""
+        if self._destroyed:
+            return
+        self._own("destroy()")
+        self._destroyed = True
         self._quit = True
-        self._hide_toast()
-        self.root.destroy()
+        self._stop_tray()
+        try:
+            if self._toast_timer is not None:
+                self.root.after_cancel(self._toast_timer)
+        except tk.TclError:
+            pass
+        self._toast_timer = None
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass                                # already gone (the window was closed by the system)
+        # The controller keeps working (and logging) without a view; it must not keep
+        # this object's windows alive, nor call into them.
+        controller, self.controller, self.executor = self.controller, None, None
+        if controller is not None and getattr(controller, "view", None) is self:
+            controller.view = View()
+        for name, value in list(vars(self).items()):
+            if _holds_tk(value):
+                setattr(self, name, type(value)() if isinstance(value, (list, dict, set)) else None)
+        del controller, value
+        release_tk()
 
     # ------------------------------------------------------------ pet
     def _draw_pet(self):
@@ -598,7 +695,14 @@ class PetApp(View):
     def _popup(self, event):
         if self.controller is None:
             return
-        menu = self._build_menu(viewmodel.menu_items(self.controller.menu(), has_tray=self._tray is not None))
+        if self._menu is not None:              # the previous menu: gone now, not whenever it is collected
+            try:
+                self._menu.destroy()
+            except tk.TclError:
+                pass
+        menu = self._menu = self._build_menu(
+            viewmodel.menu_items(self.controller.menu(), has_tray=self._tray is not None))
+        self._release_soon()
         if WIN:
             try:        # a popup menu only closes on an outside click if its owner is in front
                 win32.set_foreground(win32.top_level(self.pet.winfo_id()))
@@ -726,9 +830,28 @@ class PetApp(View):
                 self.dialogs = max(0, self.dialogs - 1)
                 if window in self.dialog_windows:
                     self.dialog_windows.remove(window)
+                self._release_soon()
         window.bind("<Destroy>", closed)
         window.after(50, lambda: window.winfo_exists() and window.focus_force())
         return window
+
+    def _watch(self, window, variable, callback):
+        """Call `callback` when `variable` is written — until `window` closes.
+
+        Never use `variable.trace_add` on its own here. A trace is a command inside the
+        Tcl interpreter that holds the Python callback; the callback holds the dialog's
+        widgets; the widgets hold the interpreter. Python's collector cannot see through
+        the interpreter, so that ring is never freed — it must be cut by hand, while the
+        interpreter is alive, which is what the <Destroy> handler does."""
+        name = variable.trace_add("write", callback)
+
+        def unwatch(event=None):
+            if event is None or event.widget is window:
+                try:
+                    variable.trace_remove("write", name)
+                except (tk.TclError, ValueError):
+                    pass
+        window.bind("<Destroy>", unwatch, add="+")
 
     def _dialog_message(self, title, text):
         self.dialogs += 1
@@ -790,8 +913,8 @@ class PetApp(View):
 
         def describe(*_):
             show(current if locked else llm.ModelConfig(provider.get(), base_url=base_url.get().strip()))
-        provider.trace_add("write", describe)
-        base_url.trace_add("write", describe)
+        self._watch(window, provider, describe)
+        self._watch(window, base_url, describe)
         describe()
         if locked:
             error.configure(text=self._wrapped(t("model_env_locked"), self.small, self.px(410)))

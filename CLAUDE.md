@@ -105,6 +105,14 @@ own words first, unchanged. The learner always acts first and always decides wha
   to the program. Windows-only modules (`hosts/win32.py`, `hosts/uia.py`) are imported
   lazily; everything else must import and test on Linux. comtypes is first imported on the
   watcher thread (see `uia.open`), never on the Tk thread.
+- **Tk belongs to one thread, to the end.** The thread that creates the interpreter makes every
+  Tk call, ends it (`PetApp.destroy`, which refuses other threads) and frees it there at once
+  (`release_tk`): Tk objects sit in reference cycles, and if the cycle collector frees the
+  interpreter from another thread, Tcl aborts the process (first Windows CI run, EV-2026-001).
+  Other threads only queue work (`_calls`, the executor inbox). Never use `variable.trace_add`
+  directly — use `PetApp._watch`, which removes the trace when the window closes (a trace
+  keeps the whole interpreter alive otherwise). Code that builds windows outside PetApp
+  destroys them and collects before any other thread starts. `tests/test_tk_lifecycle.py`.
 - **Tk.** Overlay windows get their no-activate style after being mapped once (`_prime`), and
   every geometry change goes through `PetApp._move` (see its comment). Wrap paragraphs with
   `PetApp._para` — Tk breaks lines at spaces only, which mangles Chinese.

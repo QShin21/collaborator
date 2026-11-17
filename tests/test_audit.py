@@ -293,8 +293,9 @@ class FailClosedSecrets(unittest.TestCase):
         stored = secretbox.protect("sk-secret-value")
         self.assertTrue(stored.startswith("dpapi:"))
         self.assertEqual(secretbox.reveal(stored), "sk-secret-value")
-        self.restore()
-        plain = secretbox.protect("sk-secret-value")                # as written off Windows, or by the old fallback
+        secretbox._on_windows = lambda: False                       # not restore(): on a Windows machine that
+        plain = secretbox.protect("sk-secret-value")                # is the real DPAPI. As written off Windows,
+        #                                                             or by the old fallback:
         self.assertTrue(plain.startswith("plain:"))
         self.windows(lambda data, protect: data[::-1])
         self.assertEqual(secretbox.reveal(plain), "")               # asked for again, then stored encrypted

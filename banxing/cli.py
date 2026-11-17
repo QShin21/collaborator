@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import logging.handlers
@@ -121,7 +122,12 @@ def run_pet():
             from tkinter import messagebox
             root = tkinter.Tk()
             root.withdraw()
-            messagebox.showinfo(strings.t("app_name"), strings.t("already_running"))
+            try:
+                messagebox.showinfo(strings.t("app_name"), strings.t("already_running"))
+            finally:
+                root.destroy()                 # ended and freed on the thread that made it
+                del root
+                gc.collect()
             return 0
     from .controller import ThreadedExecutor
     from .hosts import create_client
@@ -145,7 +151,14 @@ def run_pet():
     try:
         app.run()
     finally:
+        # Order matters. The watcher is stopped first; then the windows are ended and
+        # freed here, on the thread that made them, while model-call threads may still
+        # be finishing — they must never be the ones to free the Tk interpreter.
         executor.stop()
+        try:
+            app.destroy()
+        except Exception:
+            log.exception("closing the windows failed")
         context.close()
         store.log("stop")
     return 0
@@ -241,6 +254,18 @@ def _check_secretbox(folder):
 
 
 def _check_tk(folder):
+    """Build the real windows, show a bubble, open every dialog, fill once.
+
+    When this returns, nothing of Tk is left in memory: the interpreter was ended and
+    freed on this thread. The checks that follow start other threads (UI Automation
+    runs on its own), and a Tk interpreter freed from one of those aborts the process."""
+    try:
+        return _tk_walkthrough(folder)
+    finally:
+        gc.collect()        # the walkthrough's own frame is gone now; nothing may linger
+
+
+def _tk_walkthrough(folder):
     from .controller import InlineExecutor
     from .hosts.simulated import SimulatedCodex
     from .ui import strings
@@ -278,6 +303,7 @@ def _check_tk(folder):
             app.root.update()
         for window in list(app.dialog_windows):
             window.destroy()
+        window = opener = None
         app.root.update()
         controller.pick(0)
         app.root.update()
@@ -347,6 +373,9 @@ def selftest(report_path="", require=()):
                 report["checks"][name] = {"ok": True, **(check(Path(folder)) or {})}
             except Exception as error:
                 report["checks"][name] = {"ok": False, "error": f"{type(error).__name__}: {error}"[:300]}
+            # Whatever a check left behind (a failed one keeps its frames alive through
+            # the exception) is freed here, on this thread, before the next check runs.
+            gc.collect()
     missing = sorted(name for name in required if not report["checks"].get(name, {}).get("ok"))
     report["required"] = sorted(required)
     report["failed_required"] = missing

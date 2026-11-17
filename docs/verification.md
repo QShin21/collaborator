@@ -17,12 +17,16 @@
 ## 2. v0.3.0 的现状（2026-11-17）
 
 开发与测试环境是 **Linux**：没有 Windows，没有 Codex，没有模型密钥，不能联网。
-本机结果：`python3 -m unittest discover -s tests` 共 360 项，351 项通过，9 项跳过（全部是 Windows 专用项）；`python3 run.py --selftest` 的必需项通过（托盘项因未安装 pystray 记为不适用）。
+本机结果：`python3 -m unittest discover -s tests` 共 371 项，362 项通过，9 项跳过（全部是 Windows 专用项）；`python3 run.py --selftest` 的必需项通过（托盘项因未安装 pystray 记为不适用）。
 
-**一句话：E1 是满的；E2 及以上全部为空。** `docs/evidence/` 里目前没有任何记录。
+**一句话：E1 是满的；E2 及以上仍然全部为空。** `docs/evidence/` 里只有一份记录，是一次失败的运行。
 
-- Windows 侧的全部代码（`hosts/uia.py`、`hosts/win32.py`、DPAPI、非激活浮窗、托盘）**从未在 Windows 上执行**，只做过语法编译。
-- CI 与发布工作流在更名后**从未运行**。
+- **第一次 Windows CI 运行（提交 ca3ec234）没有通过**：测试进程在第 307 个用例处被 Tcl 中止，详见下面的「第一次 Windows CI 运行」
+  和 [EV-2026-001](evidence/EV-2026-001.md)。暴露的三个问题已修复，**修复后的代码还没有在 Windows 上运行过**。
+- 那次运行里，Tk 界面的 11 个屏幕用例和真实 DPAPI 的往返在 Windows 上通过了；这是一次失败运行里的观察，不算 E2。
+- `hosts/uia.py` 与 `hosts/win32.py` 的专用用例（`test_windows`）、自检步骤、替身窗口步骤在那次运行里**都没有执行到**；
+  UI Automation 客户端在 Windows 上仍然从未运行。非激活浮窗、托盘同样没有任何 Windows 上的证据。
+- 发布工作流（打包、打包后自检）**从未运行**。
 - 没有任何一步在真实的 Codex 窗口、真实的 App Server、真实的会话文件上运行过。
 - 没有任何真实模型的输出被看过；替身模型是模板加关键词规则。
 
@@ -36,7 +40,7 @@
 | --- | --- | --- | --- | --- |
 | M0-01 | 更名为伴行 | 已实现 | E1 | 包 `banxing/`、环境变量 `BANXING_*`、数据目录 `%APPDATA%\Banxing`、产物 `Banxing.exe`；全部测试在新名字下通过 |
 | M0-02 | 旧代码处置 | 已归档 | — | `collab/ eval/ prompts/ web/` 移到 `legacy/v0.1/`（按决定保留，不删除）；占位的 `tests/test_eval.py` 已去掉 |
-| M0-03 | Windows CI 首跑 | **未做** | E0 | 需要协调方推送后查看；第一次运行暴露的问题要记在这里 |
+| M0-03 | Windows CI 首跑 | **已跑一次，未通过；已修复，待重跑** | 未达到（首跑失败） | [EV-2026-001](evidence/EV-2026-001.md)；三个问题见下面「第一次 Windows CI 运行」。工作流全绿之前这一项不算完成 |
 | M0-04 | 密码框与输入框特征 | 已实现 | E1 | `tests/test_routes.py`（特征、回放）；真机见 A9 |
 | M0-05 | 界面树访问减负 | 部分实现 | E1（轮询分层）/ E0（UIA 侧的退避与按需扫描） | `poll_interval` 有测试；`uia.py` 里的搜索退避、选中项扫描降频没有离线测试，也没运行过 |
 | M0-06 | 看门狗与超时 | 已实现 | E1 | `tests/test_companion.py::FailuresAndStalls` |
@@ -91,9 +95,12 @@ M3、M4、M5 的全部工作包**未开始**（方案 8.3 的停手线）。
 | 事件日志不接受成句的文字 | E1 | `tests/test_config.py` |
 | 会话 JSONL 解析、前台聊天识别、片段提取 | E1（文件与「窗口文字」都是合成的） | `tests/test_context.py` |
 | App Server 客户端 | E1（对自建假服务端）/ 对真实服务 E0 | `tests/fake_appserver.py`；协议细节未对照官方文档 |
-| Tk 界面：伴行、路线气泡、提点气泡、预览、询问、菜单、六个对话框 | E1（在 Linux 的显示上真实渲染） | `tests/test_screens.py`、`tests/test_shell.py`；不是 Windows |
-| Win32 封装、DPAPI、UI Automation 客户端、非激活浮窗、托盘 | **E0** | 只做过语法编译 |
-| 打包、发布工作流、Windows CI | **E0** | 从未运行 |
+| Tk 界面：伴行、路线气泡、提点气泡、预览、询问、菜单、六个对话框 | E1（在 Linux 的显示上真实渲染） | `tests/test_screens.py`、`tests/test_shell.py`。屏幕用例在失败的首次 Windows 运行里通过过一次（EV-2026-001），不算 E2 |
+| Tk 解释器的线程归属与释放 | E1 | `tests/test_tk_lifecycle.py`；致命后果只在 Windows 上出现，那里尚未重跑 |
+| DPAPI | E1 | 真实 DPAPI 的往返在失败的首次 Windows 运行里通过过一次（EV-2026-001），不算 E2；失败路径只模拟过 |
+| Win32 封装、UI Automation 客户端、非激活浮窗、托盘 | **E0** | 专用用例在首次 Windows 运行里没有执行到 |
+| Windows CI | 未达到 E2 | 跑过一次，未通过（EV-2026-001） |
+| 打包、发布工作流 | **E0** | 从未运行 |
 | 真实 Codex 窗口上的一切 | **E0** | 见 [`acceptance.md`](acceptance.md) |
 | 真实模型的路线质量、可发判断、关键情况判断、条件保留 | **E0** | 需要密钥，见第 6 节 |
 | 目标用户能否看懂、选得了、接得住 | **E0** | 本轮不开展真人研究 |
@@ -109,6 +116,19 @@ M3、M4、M5 的全部工作包**未开始**（方案 8.3 的停手线）。
 | Windows 上 DPAPI 失败时静默改存可读编码 | 失败即报错，不保存任何内容；窗口给出原因和做法；Windows 上不再接受未加密的旧值 | E1（在 Linux 上替换平台判断来模拟） | 真正的 DPAPI 调用与失败路径 E0 |
 | 未校准时 watcher 仍然读取输入框，只是随后丢弃 | 闸放在宿主客户端里：未校准（或 Codex 版本变了）时 `snapshot()` 只取窗口位置，不找输入框、不取文字；只有用户发起的校准步骤和自检在其执行期间可读 | E1（真实的 watcher 线程 + 模拟宿主，计数读取次数为 0） | 未校准时不再取页面地址，窗口切换判断只靠窗口句柄 |
 | 复审追加：`uia.py` 先按旧版本判定「可读」，再识别出 Codex 已是新版本，于是对未校准的新版本读了第一眼 | 「可读」只在识别出当前 Codex 版本之后、触碰窗口内容之前判定，不再由调用方传入；版本按「窗口 + 进程」识别；回填走同一道闸（未校准的版本既不读也不写）；用户发起的校准步骤与自检仍可读 | E1：`tests/test_uia_flow.py` 在 Linux 上加载**真实的 `uia.py`**，把 Win32 和 UI Automation 换成计数的替身来执行其控制流（16 项；把旧的判定顺序放回去会有 6 项失败） | 替身按本代码的假设行事，**不是** Windows、UI Automation 或 Codex 的证据：`uia.py` 在 Windows 上仍从未运行（E0）。「版本」是可执行文件的大小与修改时间，取不到时一律按未校准处理 |
+
+### 第一次 Windows CI 运行（2026-11-17，提交 ca3ec234）：未通过
+
+记录：[EV-2026-001](evidence/EV-2026-001.md)。中止前执行完 306 个用例：通过 302，失败 2，跳过 2；其后的用例和步骤没有执行。
+
+| 问题 | 原因 | 修复 | 修复的证据 |
+| --- | --- | --- | --- |
+| 进程被 Tcl 中止：`Tcl_AsyncDelete: async handler deleted by the wrong thread` | Tk 窗口销毁后没有被当场释放，留给了循环垃圾回收；回收发生在自检的 UI Automation 线程上，解释器被别的线程删除。产品缺陷，不只是测试的问题 | Tk 解释器只由创建它的线程结束并**当场释放**（`PetApp.destroy` 放开全部 Tk 对象后立即回收；别的线程调用会被拒绝）；正式运行退出时也这样做；自检每项之后在本线程回收；关对话框、重建菜单后在 Tk 线程上回收；模型配置窗口的变量监听随窗口关闭解除（否则解释器永远释放不掉） | E1：`tests/test_tk_lifecycle.py` 11 项，在**关闭自动回收**的条件下断言销毁后内存里没有任何 Tk 对象，再在另一个线程上回收。修复前这些断言在 Linux 上同样不成立。**Windows 上尚未运行**——真正的中止只在那里发生，要等下一次 CI |
+| `test_unreachable_service_is_a_network_error` 失败 | Windows 对本机已关闭端口先重试约 2 秒才拒绝，用例只给了 2 秒，于是先超时 | 用例的超时加长。产品的超时下限是 5 秒，行为不变 | 推断（失败原文未打印）；待下一次 CI 证实 |
+| `test_a_working_dpapi_is_used_…` 失败 | 用例假定「恢复原状」就不是 Windows；在真的 Windows 上那一步用的是真 DPAPI | 改用例 | 推断；待下一次 CI 证实 |
+
+顺带改掉的两处测试自身的隐患（那次运行没走到，是复查时发现的）：`test_uia_flow` 曾把全进程的 `time.sleep` 换掉、
+并在 Windows 上不恢复真正的 `win32` 模块；`test_windows` 的替身窗口用例在加了「未校准不读取」之后需要显式打开读取，否则会全部跳过。
 
 ## 5. 写在代码里的假设
 
@@ -127,7 +147,7 @@ M3、M4、M5 的全部工作包**未开始**（方案 8.3 的停手线）。
 
 | 要补的 | 等级 | 谁 | 怎么做 |
 | --- | --- | --- | --- |
-| Windows CI 与打包自检第一次运行 | E2 | 协调方 | 推送后看 `ci`；修到绿；把暴露的问题记到 M0-03 |
+| Windows CI 重跑到全绿，然后是打包自检 | E2 | 协调方 | 推送本次修复后看 `ci`；每次运行（通过与否）在 `evidence/` 记一份；把新暴露的问题记到 M0-03 |
 | 校准向导在真实 Codex 上的结果 | E3 | 有 Windows + Codex 的人 | [`acceptance.md`](acceptance.md) 第 1 部分；导出证据包，按 [`evidence/TEMPLATE.md`](evidence/TEMPLATE.md) 记一份 |
 | A1–A11 计数验收 | E3 | 同上 | [`acceptance.md`](acceptance.md) 第 2 部分 |
 | 第一份真机结构录制进夹具 | E3→E1 | 实现者 | 把证据包里的 `structure.json` 放进 `tests/fixtures/` 并加一条回放测试 |

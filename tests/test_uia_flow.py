@@ -14,6 +14,7 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ from rig import RigCase
 
 UIA_SOURCE = Path(hosts_package.__file__).parent / "uia.py"
 DRAFT = "这是写在 Codex 输入框里的一段草稿"
+REAL_SLEEP = time.sleep
 
 
 class FakeWin32(types.ModuleType):
@@ -217,7 +219,8 @@ def load_uia(win32):
     name = "banxing.hosts._uia_under_test"
     comtypes = types.ModuleType("comtypes")
     comtypes.__spec__ = importlib.machinery.ModuleSpec("comtypes", None)
-    had_attr = hasattr(hosts_package, "win32")
+    missing = object()
+    real_attr = getattr(hosts_package, "win32", missing)        # on Windows the real module may be loaded
     saved = {key: sys.modules.get(key) for key in ("banxing.hosts.win32", "comtypes", name)}
     platform = sys.platform
     sys.modules["banxing.hosts.win32"] = win32
@@ -232,8 +235,10 @@ def load_uia(win32):
         return module
     finally:
         sys.platform = platform
-        if not had_attr:
+        if real_attr is missing:
             del hosts_package.win32
+        else:
+            hosts_package.win32 = real_attr
         for key, value in saved.items():
             if value is None:
                 sys.modules.pop(key, None)
@@ -251,7 +256,9 @@ class UiaFlow(RigCase):
         self.client = self.uia.WindowsCodexClient(Profile.default())
         self.client._uia = FakeAutomation(self.world)
         self.client._api = FakeApi()
-        self.uia.time.sleep = lambda seconds: None
+        # The module's OWN view of time: no waiting. (Never patch the shared `time`
+        # module — every later test in the process would stop sleeping.)
+        self.uia.time = types.SimpleNamespace(monotonic=time.monotonic, sleep=lambda seconds: None)
         self.now = 10.0
 
     def look(self):
@@ -270,10 +277,14 @@ class UiaFlow(RigCase):
     def test_the_real_module_is_loaded_and_leaves_no_trace(self):
         self.assertEqual(Path(self.uia.__file__), UIA_SOURCE)
         self.assertIs(self.uia.win32, self.win32)
-        self.assertNotIn("banxing.hosts.win32", sys.modules)
+        self.assertIsNot(sys.modules.get("banxing.hosts.win32"), self.win32)
+        self.assertIsNot(getattr(hosts_package, "win32", None), self.win32)
         self.assertNotIn("banxing.hosts._uia_under_test", sys.modules)
-        self.assertFalse(hasattr(hosts_package, "win32"))
+        self.assertIs(time.sleep, REAL_SLEEP)                         # the shared clock was not touched
         if sys.platform != "win32":
+            self.assertNotIn("banxing.hosts.win32", sys.modules)
+            self.assertNotIn("comtypes", sys.modules)
+            self.assertFalse(hasattr(hosts_package, "win32"))
             with self.assertRaises(ImportError):
                 import banxing.hosts.win32  # noqa: F401
 

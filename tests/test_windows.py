@@ -105,6 +105,9 @@ class StandInWindow(unittest.TestCase):
             raise unittest.SkipTest("the stand-in window did not appear")
         exe = win32.process_name(win32.window_pid(cls.hwnd))
         cls.client = WindowsCodexClient(Profile(process_names=(exe,)))
+        # A client reads nothing until reading is switched on (in the app: by a passed
+        # calibration). This window is the test's own, holding the test's own text.
+        cls.client.set_reading(True)
         cls.client.open()
 
     @classmethod

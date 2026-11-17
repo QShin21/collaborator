@@ -88,9 +88,12 @@ class DocumentTests(unittest.TestCase):
 
     def test_nothing_published_claims_more_than_offline_evidence(self):
         """No record of a real-device run exists yet; the papers must not sound as if one did."""
-        records = [p.name for p in (ROOT / "docs" / "evidence").glob("EV-*.md")]
+        # A record of a FAILED run is evidence too, and changes nothing here. Only a record
+        # that itself claims a real-device level ends this check.
+        records = [p.name for p in (ROOT / "docs" / "evidence").glob("EV-*.md")
+                   if re.search(r"(?m)^证据等级：\s*E[3-5]", p.read_text(encoding="utf-8"))]
         if records:
-            self.skipTest("real evidence has been recorded; review the wording by hand")
+            self.skipTest("real-device evidence has been recorded; review the wording by hand")
         for relative in ("README.md", "docs/verification.md", "packaging/windows/README.txt",
                          ".github/workflows/release.yml"):
             text = self.read(relative)
@@ -513,9 +516,12 @@ class EntryPointTests(unittest.TestCase):
 
 def _display_available():
     try:
+        import gc
         import tkinter
         root = tkinter.Tk()
         root.destroy()
+        del root
+        gc.collect()        # freed here, on the thread that made it (see ui/app.py, "Threads")
         return ""
     except Exception as error:      # no tkinter, or no display
         return f"{type(error).__name__}: {error}"

@@ -123,8 +123,12 @@ class LLMWireTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         config = llm.ModelConfig("openai", base_url=self.base, api_key="k")
+        # Windows does not refuse a connection to a closed local port at once: it tries
+        # again for about two seconds first. With a shorter allowance the attempt ends
+        # as a timeout (seen in the first Windows CI run, where this test used 2 s). The
+        # app's own allowance is never below 5 s, so a refusal is reported as one.
         with self.assertRaises(llm.LLMError) as caught:
-            llm.complete(config, "s", "u", timeout=2)
+            llm.complete(config, "s", "u", timeout=15)
         self.assertEqual(caught.exception.kind, "network")
 
     def test_missing_key_or_unknown_provider_never_reaches_the_network(self):
