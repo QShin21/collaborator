@@ -1,0 +1,6 @@
+[
+  {"role": 50004, "framework": "Chrome", "multiline": false, "patterns": ["value"], "read_only": false, "password": false, "focused": false, "box": [0.02, 0.02, 0.2, 0.06], "name_len": 6, "value_len": 0},
+  {"role": 50004, "framework": "Chrome", "multiline": false, "patterns": ["value"], "read_only": false, "password": true, "focused": false, "box": [0.3, 0.4, 0.7, 0.45], "name_len": 8, "value_len": null},
+  {"role": 50030, "framework": "Chrome", "multiline": false, "patterns": ["value", "text"], "read_only": true, "password": false, "focused": false, "box": [0.0, 0.0, 1.0, 1.0], "name_len": 5, "value_len": 40},
+  {"role": 50004, "framework": "Chrome", "multiline": true, "patterns": ["value", "text"], "read_only": false, "password": false, "focused": true, "box": [0.22, 0.86, 0.96, 0.95], "name_len": 0, "value_len": 23}
+]

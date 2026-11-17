@@ -7,26 +7,85 @@ jobs:
     name: test (py${{ matrix.python }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false   # one interpreter failing should not hide the other's result
+      fail-fast: false   # one platform failing should not hide the other's result
       matrix:
         include:
           # Oldest supported interpreter. Python 3.9 is end-of-life and actions/setup-python
-          # has no build of it for newer runner images (ubuntu-latest is now 26.04), so this
-          # job is pinned to the newest image that still has one. When ubuntu-24.04 is
-          # retired, raise the minimum Python version here and in README/CLAUDE.md together.
+          # has no build of it for newer runner images, so this job is pinned to the newest
+          # image that still has one. When ubuntu-24.04 is retired, raise the minimum Python
+          # version here and in README/CLAUDE.md together.
           - os: ubuntu-24.04
             python: "3.9"
-          # Current interpreter on the current image.
           - os: ubuntu-latest
             python: "3.13"
+          # The platform the product is for.
+          - os: windows-latest
+            python: "3.12"
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit tests (offline mock model, no dependencies)
-        run: python -m unittest discover -s tests -v
-      - name: Evaluation harness smoke run
-        run: python eval/run_eval.py --turns 1 --scenarios waste-sorting grid-paths --out "$RUNNER_TEMP/reports"
+
+      - name: Windows runtime dependencies
+        if: runner.os == 'Windows'
+        run: python -m pip install --upgrade pip -r requirements-windows.txt
+
+      # Linux: a virtual display lets the Tk shell tests run for real (they skip without one).
+      - name: Unit tests (offline, synthetic data only)
+        if: runner.os != 'Windows'
+        run: |
+          if command -v xvfb-run >/dev/null; then
+            xvfb-run -a python -m unittest discover -s tests -v
+          else
+            python -m unittest discover -s tests -v
+          fi
+
+      # tests/test_screens.py saves pictures of the pet's own windows (it needs Pillow, which
+      # only the Windows job installs). They are uploaded below for a human to look at.
+      - name: Unit tests (offline, synthetic data only)
+        if: runner.os == 'Windows'
         env:
-          COLLAB_PROVIDER: mock
+          BANXING_SHOTS: ${{ runner.temp }}/shots
+        run: python -m unittest discover -s tests -v
+
+      - name: Self-test
+        if: runner.os != 'Windows'
+        run: python run.py --selftest --report "$RUNNER_TEMP/selftest.json"
+
+      - name: Self-test (Tk, Win32 and UI Automation must work)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python run.py --selftest --require tk,win32,uia --report "$env:RUNNER_TEMP\selftest.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # A native text box stands in for the Codex input box. It shows that reading and
+      # filling through UI Automation work on Windows at all — nothing about Codex itself.
+      # Needs the foreground on the runner's desktop, so it must not fail the job.
+      - name: UI Automation against a stand-in window (informational)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          BANXING_LIVE: "1"
+        run: |
+          python -m unittest discover -s tests -p "test_windows.py" -v 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\standin.log"
+          $code = $LASTEXITCODE
+          "### UI Automation stand-in (not Codex)`n`n``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP\standin.log" -Tail 30 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/selftest.json
+            ${{ runner.temp }}/standin.log
+            ${{ runner.temp }}/shots/*.png
+          if-no-files-found: ignore
