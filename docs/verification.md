@@ -17,7 +17,7 @@
 ## 2. v0.3.0 的现状（2026-11-17）
 
 开发与本地测试环境是 **Linux**：没有 Windows、Codex 或模型密钥。
-第七次 Windows CI 已跑完 414 项单测并通过（7 项跳过，包括单独运行的 4 项替身窗口用例），必需自检通过；见下文。
+第八次 Windows CI 已跑完 414 项单测并通过（7 项跳过，包括单独运行的 4 项替身窗口用例），必需自检通过；见下文。
 
 **一句话：E1 很厚，Windows 的基本调用已有部分 E2，但剪贴板粘贴回填仍失败；E3 及以上仍然为空。**
 
@@ -37,7 +37,10 @@
   不可称复原成功。
 - **第七次 Windows CI（提交 b170d05）剪贴板文本/locale 复原通过，仍未读回粘贴后的目标草稿**：
   见 [EV-2026-007](evidence/EV-2026-007.md)。`SendInput` 报完整事件数后，限时读回不匹配；
-  原因可能在键盘投递、焦点或编辑器接受粘贴，须做无正文诊断，不能记粘贴 E2。
+  当时尚不知原因，不能记粘贴 E2。
+- **第八次 Windows CI（提交 5bb27f7）脱敏诊断指向替身多行 TextBox 的旧 Ctrl+A 行为**：
+  见 [EV-2026-008](evidence/EV-2026-008.md)。焦点正确，草稿长度 29 正好是原文 20 加欲贴文本 9；
+  与微软文档记载的旧 WinForms 多行框未全选问题吻合。只修替身进程配置并加独立全选契约，待 Windows 重跑。
 - 那次运行里，Tk 界面的 11 个屏幕用例和真实 DPAPI 的往返在 Windows 上通过了；这是一次失败运行里的观察，不算 E2。
 - 第二次运行中 `test_windows` 的基本调用、自检、替身窗口读取与 ValuePattern 回填已通过；粘贴与剪贴板复原未通过。
   非激活浮窗、托盘的完整交互仍没有 Windows 上的证据。
@@ -55,7 +58,7 @@
 | --- | --- | --- | --- | --- |
 | M0-01 | 更名为伴行 | 已实现 | E1 | 包 `banxing/`、环境变量 `BANXING_*`、数据目录 `%APPDATA%\Banxing`、产物 `Banxing.exe`；全部测试在新名字下通过 |
 | M0-02 | 旧代码处置 | 已归档 | — | `collab/ eval/ prompts/ web/` 移到 `legacy/v0.1/`（按决定保留，不删除）；占位的 `tests/test_eval.py` 已去掉 |
-| M0-03 | Windows CI 与替身回填 | **主任务通过，替身粘贴仍未通过；键盘投递待定位** | 部分 E2，未达到退出条件 | [EV-2026-001](evidence/EV-2026-001.md) 至 [EV-2026-007](evidence/EV-2026-007.md)；不能以 informational 步骤的失败换取完成状态 |
+| M0-03 | Windows CI 与替身回填 | **主任务通过，替身粘贴仍未通过；替身 Ctrl+A 配置待重跑** | 部分 E2，未达到退出条件 | [EV-2026-001](evidence/EV-2026-001.md) 至 [EV-2026-008](evidence/EV-2026-008.md)；不能以 informational 步骤的失败换取完成状态 |
 | M0-04 | 密码框与输入框特征 | 已实现 | E1 | `tests/test_routes.py`（特征、回放）；真机见 A9 |
 | M0-05 | 界面树访问减负 | 部分实现 | E1（轮询分层）/ E0（UIA 侧的退避与按需扫描） | `poll_interval` 有测试；`uia.py` 里的搜索退避、选中项扫描降频没有离线测试，也没运行过 |
 | M0-06 | 看门狗与超时 | 已实现 | E1 | `tests/test_companion.py::FailuresAndStalls` |
@@ -114,7 +117,7 @@ M3、M4、M5 的全部工作包**未开始**（方案 8.3 的停手线）。
 | Tk 解释器的线程归属与释放 | E1 + Windows 单测通过 | `tests/test_tk_lifecycle.py` 11 项在第二次 Windows CI 通过；没有再发生 Tcl 中止 |
 | DPAPI | E1 + Windows 往返通过 | 第二次 Windows CI 通过真实 DPAPI 往返；故障路径仍只模拟过 |
 | Win32 封装、UI Automation 客户端、非激活浮窗、托盘 | 部分 E2 | 第二次 Windows CI 的基本调用、自检、替身读取和 ValuePattern 写入通过；粘贴失败；非激活浮窗和托盘交互未验证 |
-| Windows CI | 部分 E2，未完成 | 第二至七次运行主任务成功，但 informational 替身粘贴用例仍未通过（[EV-2026-002](evidence/EV-2026-002.md) 至 [EV-2026-007](evidence/EV-2026-007.md)） |
+| Windows CI | 部分 E2，未完成 | 第二至八次运行主任务成功，但 informational 替身粘贴用例仍未通过（[EV-2026-002](evidence/EV-2026-002.md) 至 [EV-2026-008](evidence/EV-2026-008.md)） |
 | 打包、发布工作流 | **E0** | 从未运行 |
 | 真实 Codex 窗口上的一切 | **E0** | 见 [`acceptance.md`](acceptance.md) |
 | 真实模型的路线质量、可发判断、关键情况判断、条件保留 | **E0** | 需要密钥，见第 6 节 |
@@ -193,6 +196,16 @@ Unicode 正文、格式和 locale 才认领新序号；粘贴前及复原前再�
 但 1.2 秒内没有读回期望文本，返回 `not_received`。日志尚未区分键盘投递、焦点或编辑器拒绝粘贴，
 也未说明失败后的草稿是否完全没变。应先增加只含焦点、选区和长度/相等布尔值的诊断；
 不能把该工作流总体的 success 或剪贴板复原成功当作回填通过。
+
+### 第八次 Windows CI 运行（2026-11-17，提交 5bb27f7）：替身 Ctrl+A 契约
+
+记录：[EV-2026-008](evidence/EV-2026-008.md)。414 项 Windows 单测和必需自检通过，替身窗口仍为 7/8。
+脱敏诊断显示目标窗口及原生编辑框有焦点，但失败后的草稿长度为 29，等于原文 20 加目标文本 9。
+这支持 Ctrl+V 到达而 Ctrl+A 未完成全选的推断，并与微软
+[TextBox.ProcessCmdKey 文档](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.textbox.processcmdkey?view=netframework-4.8)
+描述的旧版多行框行为吻合。现在只在 PowerShell 替身进程设官方 AppContext 开关，
+并以独立测试验证空选区→真实 Ctrl+A→全选→再次折叠，保证后续粘贴测试仍必须自行全选。
+产品 SendInput 路径、严格断言和失败安全闸未变。即使替身重跑通过，真实 Codex 的非空中文/多行替换仍是 E0。
 
 ## 5. 写在代码里的假设
 

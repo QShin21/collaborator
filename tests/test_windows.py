@@ -134,9 +134,30 @@ class StandInWindow(unittest.TestCase):
     def key(self, snap):
         return (snap.window_id, snap.chat_key, snap.box_id)
 
+    @staticmethod
+    def native_edit_message(hwnd, message, start=0, end=0):
+        """Bounded system edit-control query; only selection offsets leave here."""
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        send = user32.SendMessageTimeoutW
+        send.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t,
+                         ctypes.c_ssize_t, wintypes.UINT, wintypes.UINT,
+                         ctypes.POINTER(ctypes.c_size_t)]
+        send.restype = ctypes.c_ssize_t
+        result = ctypes.c_size_t(0)
+        if not send(hwnd, message, start, end, 0x0002, 500, ctypes.byref(result)):
+            return None
+        return result.value
+
+    def native_selection(self, hwnd):
+        packed = self.native_edit_message(hwnd, 0x00B0)  # EM_GETSEL
+        if packed is None or packed == 0xFFFFFFFF:
+            return None
+        return (packed & 0xFFFF, (packed >> 16) & 0xFFFF)
+
     def keyboard_diagnostic(self, snap, actual):
         """Only focus/selection facts, never draft or clipboard text."""
         result = {"draft_unchanged": actual == snap.draft,
+                  "pasted_appended_to_original": actual == snap.draft + "pasted 文本",
                   "draft_empty": actual == "", "draft_length": len(actual or ""),
                   "foreground_target": self.win32.foreground_window() == self.hwnd}
         try:
@@ -144,6 +165,11 @@ class StandInWindow(unittest.TestCase):
             result["uia_box_focused"] = bool(self.client._uia.CompareElements(focused, self.client._box))
             native_box = int(self.client._box.CurrentNativeWindowHandle or 0)
             result["native_box_handle"] = bool(native_box)
+            if native_box:
+                selection = self.native_selection(native_box)
+                if selection is not None:
+                    result["native_selection_start"] = selection[0]
+                    result["native_selection_length"] = selection[1] - selection[0]
 
             class GuiThreadInfo(ctypes.Structure):
                 _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
@@ -199,6 +225,38 @@ class StandInWindow(unittest.TestCase):
         self.assertEqual(" ".join(after.draft.split()), " ".join(prompt.split()))
         back = self.client.fill(self.key(after), after.draft, snap.draft)
         self.assertTrue(back.ok, back.reason)
+
+    def test_2a_native_multiline_ctrl_a_selects_all_without_changing_text(self):
+        """The stand-in must honor the shortcut the paste path actually uses."""
+        snap = self.snapshot()
+        edit = int(self.client._box.CurrentNativeWindowHandle or 0)
+        self.assertTrue(edit, "stand-in TextBox has no native edit handle")
+        self.assertTrue(self.client._focus(self.hwnd, self.client._box), "stand-in edit cannot get focus")
+        end = len(snap.draft)
+        try:
+            self.native_edit_message(edit, 0x00B1, end, end)  # EM_SETSEL: start unselected
+            self.assertEqual(self.native_selection(edit), (end, end),
+                             "stand-in caret could not be collapsed before Ctrl+A")
+            self.assertTrue(self.win32.send_shortcuts((self.win32.VK_CONTROL, self.win32.VK_A)),
+                            "Ctrl+A was not injected")
+            deadline = time.monotonic() + 0.8
+            selection = None
+            while time.monotonic() < deadline:
+                selection = self.native_selection(edit)
+                if selection == (0, len(snap.draft)):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(selection == (0, len(snap.draft)),
+                            f"stand-in Ctrl+A contract failed; selection={selection}; "
+                            f"draft_length={len(snap.draft)}")
+            self.assertTrue(self.client._read(self.client._box) == snap.draft,
+                            "Ctrl+A changed stand-in draft content")
+        finally:
+            # Leave the caret at the end. The next test must prove its *own*
+            # Ctrl+A works, not inherit a preselected draft from this check.
+            self.native_edit_message(edit, 0x00B1, end, end)  # EM_SETSEL
+            self.assertEqual(self.native_selection(edit), (end, end),
+                             "stand-in caret could not be collapsed after Ctrl+A")
 
     def test_3_paste_path_fills_and_puts_the_clipboard_back(self):
         snap = self.snapshot()

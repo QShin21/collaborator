@@ -463,6 +463,24 @@ class UiaFlow(RigCase):
         self.assertEqual((ok, why, self.world.draft), (False, "not_received", DRAFT))
         self.assertEqual((clip["kind"], clip["text"]), ("text", "saved clipboard"))
 
+    def test_editor_without_ctrl_a_reports_failure_not_a_false_success_or_retry(self):
+        self.calibrated_for_current_version()
+        snap = self.look()
+        self.world.box().CurrentFrameworkId = "Chrome"  # paste goes first
+        clip, _ = self.paste_clipboard()
+        added = "new prompt"
+
+        def append_instead_of_replace(*chords):
+            self.world.type(self.world.draft + clip["text"])
+            return True
+
+        self.win32.send_shortcuts = append_instead_of_replace
+        self.client._fill_value = lambda *args: self.fail("must not retry or replay after injected keys")
+        result = self.client.fill(self.key_of(snap), DRAFT, added)
+        self.assertEqual((result.ok, result.reason, self.world.draft),
+                         (False, "not_received", DRAFT + added))
+        self.assertEqual(clip["text"], "saved clipboard")
+
     def test_a_new_user_copy_is_never_overwritten_by_clipboard_restoration(self):
         self.calibrated_for_current_version()
         self.look()
