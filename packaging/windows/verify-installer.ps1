@@ -101,13 +101,30 @@ try {
     }
 
     Step "Start Menu and desktop shortcuts point at the installed program" {
+        # The shortcut is called "<ban><xing> Banxing.lnk" (U+4F34 U+884C; this file stays ASCII).
+        # WScript.Shell opens files through the ANSI code page: handed that name on an
+        # English Windows it finds nothing and answers with an empty shortcut (the first
+        # CI run of this script failed exactly so). The name is therefore checked on its
+        # own, and the target is read from a copy with a plain name.
+        $expected = ([string][char]0x4F34) + ([string][char]0x884C) + " Banxing.lnk"
         $shell = New-Object -ComObject WScript.Shell
+        $names = @()
         foreach ($folder in @($startMenu, $desktop)) {
             $found = @(Shortcuts $folder)
             Require ($found.Count -eq 1) "expected one shortcut in $folder, found $($found.Count)"
-            $target = $shell.CreateShortcut($found[0].FullName).TargetPath
+            Require ($found[0].Name -ceq $expected) "the shortcut in $folder has an unexpected name (code points: $(($found[0].Name.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' '))"
+            $copy = Join-Path $logs ("shortcut-" + [System.Guid]::NewGuid().ToString("N") + ".lnk")
+            Copy-Item -LiteralPath $found[0].FullName -Destination $copy
+            $link = $shell.CreateShortcut($copy)
+            $target = [string]$link.TargetPath
+            $workdir = ([string]$link.WorkingDirectory).TrimEnd("\")
+            Remove-Item -LiteralPath $copy -Force
+            Require ($target -ne "") "the shortcut in $folder could not be read, or has no target"
             Require ($target -ieq $exe) "the shortcut in $folder points at $target"
+            Require ($workdir -ieq $dir) "the shortcut in $folder starts in $workdir"
+            $names += $found[0].Name.Length
         }
+        @{ shortcuts = $names.Count; name_length = $names[0] }
     }
 
     Step "the installed program passes its self-test" {

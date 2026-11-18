@@ -170,6 +170,14 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(re.findall(r"(?m)^\[(\w+)\]", active), ["Setup", "Languages", "Tasks", "Files", "Icons", "Run"])
         check = self.read("packaging/windows/verify-installer.ps1")
         self.assertIn("{" + self.APP_GUID + "}_is1", check)
+        for path in sorted((ROOT / "packaging" / "windows").glob("*.ps1")):
+            path.read_bytes().decode("ascii")                                      # read alike by every PowerShell
+        # WScript.Shell cannot open a file whose name is outside the ANSI code page: the
+        # shortcut's Chinese name is checked by code point, its target read from a copy.
+        self.assertIn("[char]0x4F34) + ([string][char]0x884C", check)
+        self.assertIn("$shell.CreateShortcut($copy)", check)
+        self.assertNotIn("CreateShortcut($found", check)
+        self.assertIn("Name: \"{autoprograms}\\\u4f34\u884c Banxing\"", script)
         for needle in ("/VERYSILENT", "unins000.exe", "settings.json", "the user's data folder was left alone"):
             self.assertIn(needle, check)
 
