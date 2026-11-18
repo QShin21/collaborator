@@ -16,6 +16,19 @@ docs/product-brief-original.md
 # Task notes handed to a coding agent in this working copy; never part of a commit.
 .*-task.txt
 
+# Plans and attachments handed over privately stay outside the repository. If a copy ever
+# lands in the working tree, it is not to be committed — wherever it sits.
+banxing-long-conversation.md
+/inputs/
+*.private.md
+
+# Agent session files, scratch output and backups
+.claude/
+.tmp-home/
+.dev_*
+*.bak
+*.orig
+
 # local data and secrets never belong in the repository
 .env
 /data/

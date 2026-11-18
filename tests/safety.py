@@ -16,7 +16,8 @@ import shutil
 import tempfile
 
 SANDBOX = tempfile.mkdtemp(prefix="banxing-sandbox-")
-CLEARED = ("BANXING_PROVIDER", "BANXING_MODEL", "BANXING_BASE_URL", "BANXING_API_KEY", "BANXING_PROCESS_NAMES")
+CLEARED = ("BANXING_PROVIDER", "BANXING_MODEL", "BANXING_BASE_URL", "BANXING_API_KEY", "BANXING_PROCESS_NAMES",
+           "BANXING_REVIEW_MODEL")
 
 os.environ["CODEX_HOME"] = os.path.join(SANDBOX, "codex-home")
 os.environ["BANXING_HOME"] = os.path.join(SANDBOX, "banxing-home")

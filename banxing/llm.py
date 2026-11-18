@@ -114,7 +114,7 @@ class LLMError(Exception):
 
 
 def check_base_url(url):
-    """An endpoint receives the API key and the drafts: https only, except on this machine."""
+    """An endpoint receives the API key and the conversation: https only, except on this machine."""
     if not url:
         return
     parts = urlparse(url)
@@ -200,7 +200,7 @@ def _anthropic(config, system, user, max_tokens, timeout):
     if with_effort:
         body["output_config"] = {"effort": config.effort}
     # One request, never a quiet second try: a 400 can mean anything (wrong model,
-    # request too long, a policy refusal), and re-sending the draft in a different
+    # request too long, a policy refusal), and re-sending the conversation in a different
     # shape behind the user's back is not ours to decide. If the service says it does
     # not know the effort field, that is reported so the user can set effort to "none".
     try:

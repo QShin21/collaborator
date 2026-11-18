@@ -1,4 +1,6 @@
 name: ci
+# NOTE: rewritten for the supervising app (0.4) and NOT YET RUN. Its first run is itself a
+# test; see docs/verification.md, W-17.
 on:
   push:
   pull_request:
@@ -18,7 +20,7 @@ jobs:
             python: "3.9"
           - os: ubuntu-latest
             python: "3.13"
-          # The platform the product is for.
+          # The platform the app is for.
           - os: windows-latest
             python: "3.12"
     env:
@@ -29,7 +31,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Windows runtime dependencies
+      - name: Optional Windows dependencies (tray icon)
         if: runner.os == 'Windows'
         run: python -m pip install --upgrade pip -r requirements-windows.txt
 
@@ -43,41 +45,27 @@ jobs:
             python -m unittest discover -s tests -v
           fi
 
-      # tests/test_screens.py saves pictures of the pet's own windows (it needs Pillow, which
-      # only the Windows job installs). They are uploaded below for a human to look at.
       - name: Unit tests (offline, synthetic data only)
         if: runner.os == 'Windows'
-        env:
-          BANXING_SHOTS: ${{ runner.temp }}/shots
         run: python -m unittest discover -s tests -v
 
       - name: Self-test
         if: runner.os != 'Windows'
         run: python run.py --selftest --report "$RUNNER_TEMP/selftest.json"
 
-      - name: Self-test (Tk, Win32 and UI Automation must work)
+      - name: Self-test (Tk and the Win32 shell calls must work)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python run.py --selftest --require tk,win32,uia --report "$env:RUNNER_TEMP\selftest.json"
+          python run.py --selftest --require tk,win32 --report "$env:RUNNER_TEMP\selftest.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # A native text box stands in for the Codex input box. It shows that reading and
-      # filling through UI Automation work on Windows at all — nothing about Codex itself.
-      # Needs the foreground on the runner's desktop, so it must not fail the job.
-      - name: UI Automation against a stand-in window (informational)
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: pwsh
+      # The labelled conversations through the offline stand-in: shows that the whole
+      # pipeline runs on this platform. It says nothing about the quality of supervision.
+      - name: Replay (offline stand-in, plumbing only)
         env:
-          BANXING_LIVE: "1"
-        run: |
-          python -m unittest discover -s tests -p "test_windows.py" -v 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\standin.log"
-          $code = $LASTEXITCODE
-          "### UI Automation stand-in (not Codex)`n`n``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-          Get-Content "$env:RUNNER_TEMP\standin.log" -Tail 30 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-          "``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-          exit $code
+          BANXING_PROVIDER: mock
+        run: python run.py --replay --report "${{ runner.temp }}/replay.json"
 
       - name: Keep the reports
         if: always()
@@ -86,6 +74,5 @@ jobs:
           name: reports-${{ matrix.os }}-py${{ matrix.python }}
           path: |
             ${{ runner.temp }}/selftest.json
-            ${{ runner.temp }}/standin.log
-            ${{ runner.temp }}/shots/*.png
+            ${{ runner.temp }}/replay.json
           if-no-files-found: ignore

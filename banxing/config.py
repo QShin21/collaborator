@@ -11,9 +11,9 @@ Settings rules that must hold (tests/test_security.py and test_config.py cover t
     never follows a changed endpoint — not through the dialog, not through an
     edited settings file, not through BANXING_PROVIDER / BANXING_BASE_URL;
   * endpoints are https, except on this machine;
-  * following starts only after the user has seen where drafts are sent. Consent
-    names the effective origin (scheme, host, port — environment overrides
-    included) and is void as soon as that changes.
+  * a consent names the effective origin (scheme, host, port — environment overrides
+    included) and is void as soon as that changes. A watched conversation is agreed
+    to one at a time (watch/driver.py); the general consent here serves --replay.
 """
 from __future__ import annotations
 
@@ -26,36 +26,29 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import APP_ID, llm, secretbox
-from .follow import Tuning
 
 FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(__file__).resolve().parent
 
-SETTINGS_SCHEMA = 2      # 1 = generation 1 ("version": 1); the fields carried over unchanged
+SETTINGS_SCHEMA = 3      # 1, 2 = the draft-routes generations; their model fields carry over unchanged
 
-DEFAULTS = {
-    "schema": SETTINGS_SCHEMA,
-    "provider": "",              # "" = not configured yet
-    "model": "",
-    "base_url": "",
-    "effort": "low",             # the bubble should come quickly
-    "api_key": "",               # protected form, see secretbox
-    "key_for": "",               # the provider and endpoint that key was entered for
-    "consent": "",               # the destination the user agreed to send drafts to
-    "follow": True,              # False = paused from the menu
-    "use_context": True,         # 参考当前聊天
-    "language": "auto",          # auto | zh | en
-    "pet_offset": None,          # [dx, dy] from the Codex window's bottom-right corner
-    "pet_free": None,            # [x, y] when no Codex window is around
-    "codex_command": "",         # override for `codex app-server`
-    "sessions_dir": "",          # override for ~/.codex/sessions
-    "process_names": [],         # extra executable names to treat as Codex
-    "placeholders": [],          # what an empty Codex input box reads as (learned in the self-check)
-    "pause_seconds": 1.5,
-    "ignore_after_seconds": 2.0,
-    "model_timeout_seconds": 30.0,
-    "poll_seconds": 0.25,
-}
+DEFAULTS = dict(
+    schema=SETTINGS_SCHEMA,
+    provider="",                 # "" = not configured yet. This is the SUPERVISING model.
+    model="",
+    base_url="",
+    effort="medium",             # reading a long conversation for what it rests on is worth some thought
+    api_key="",                  # protected form, see secretbox
+    key_for="",                  # the provider and endpoint that key was entered for
+    consent="",                  # a destination agreed to in general (used by --replay); a watched
+    #                              conversation is agreed to one at a time, in its own dialog
+    language="auto",             # auto | zh | en
+    pet_free=None,               # [x, y] of the figure on screen
+    codex_command="",            # override for `codex app-server`
+    sessions_dir="",             # override for ~/.codex/sessions
+    model_timeout_seconds=60.0,
+    watch_poll_seconds=5.0,      # how often a watched conversation's file is looked at again
+)
 
 
 def home():
@@ -166,7 +159,7 @@ class Settings:
             provider=provider,
             model=env.get("BANXING_MODEL") or (self.get("model") if same else "") or "",
             base_url=env.get("BANXING_BASE_URL") or (self.get("base_url") if same else "") or "",
-            effort=self.get("effort") or "low")
+            effort=self.get("effort") or "medium")
         key = env.get("BANXING_API_KEY") or ""
         if not key and config.target and config.target == self.get("key_for"):
             key = self._saved_key()
@@ -179,7 +172,7 @@ class Settings:
         return (config or self.model_config()).destination
 
     def consented(self, config=None):
-        """Has the user agreed to send drafts to where `config` (default: the
+        """Has the user agreed, in general, to send text to where `config` (default: the
         effective configuration) sends them?"""
         destination = self.destination(config)
         return destination == "" or self.get("consent") == destination
@@ -197,7 +190,7 @@ class Settings:
         self.set(consent=destination)
         return True
 
-    def save_model(self, provider, model="", base_url="", api_key="", effort="low"):
+    def save_model(self, provider, model="", base_url="", api_key="", effort="medium"):
         """Apply the model dialog. Raises ValueError with a reason the dialog shows."""
         def tidy(value):
             return " ".join(str(value or "").split())
@@ -209,7 +202,7 @@ class Settings:
         api_key = tidy(api_key)
         effort = tidy(effort).lower()
         updates = {"provider": provider, "model": tidy(model),
-                   "effort": effort if effort in ("low", "medium", "high", "none") else "low"}
+                   "effort": effort if effort in ("low", "medium", "high", "none") else "medium"}
         if provider == "mock":
             updates.update(base_url="", api_key="", key_for="")
         else:
@@ -240,11 +233,6 @@ class Settings:
             self.data["consent"] = ""           # a new destination needs a new yes
         self.save()
         return self.model_config()
-
-    # ------------------------------------------------------------ tuning
-    def tuning(self):
-        return Tuning(pause=self.number("pause_seconds", 0.4, 10.0),
-                      ignore_after=self.number("ignore_after_seconds", 0.5, 30.0))
 
 
 def now_iso():

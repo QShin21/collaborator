@@ -1,17 +1,16 @@
-"""The gate in front of a fill: look at what the model wrote before it can reach an
-input box. Pure functions.
+"""The safety gate: look at what a model wrote before it reaches the user. Pure functions.
 
-The model writes only the second half of a prompt (what to do now, what to hand
-back, how to check). That text is read here against the draft and the chat excerpt:
+The supervising model reads a conversation that may contain anything — including text
+that tries to steer whoever reads it. What it writes back (a finding, the question to
+take to the main model) is read here against what was already in the conversation:
 
-  drop     the route is removed — an address that came from nowhere, sending
+  drop     the answer is discarded — an address that came from nowhere, sending
            credentials somewhere, download-and-run, "ignore your instructions"
-  caution  the route is shown with a warning and needs a look at the preview
-           before it is filled — asking for elevated rights, or something
+  caution  it is shown with a warning — asking for elevated rights, or something
            destructive with no preview / copy / backup / way back
 
-The word lists are data: tune them with the evaluation set (evalkit), which holds
-injection cases that must all be stopped.
+`check(text, "", conversation)`: the first argument is what the model wrote, the last
+what it was given. The word lists are data.
 """
 from __future__ import annotations
 

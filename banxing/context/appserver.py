@@ -2,18 +2,22 @@
 
 Protocol as implemented here: JSON-RPC 2.0 messages, one per line, over the child
 process's stdin/stdout (the "jsonrpc" field is optional on the wire). After the
-`initialize` / `initialized` handshake only two kinds of request are ever sent:
+`initialize` / `initialized` handshake only three kinds of request are ever sent:
 
   thread/list         recent threads (id, preview, name, cwd, updatedAt, path)
   thread/turns/list   the turns of one thread, by thread id, paged
                       (falls back to thread/read with includeTurns)
+  thread/items/list   the items of a thread, paged — only when the turns came back
+                      without their items (watching a long conversation needs them)
 
 No thread is started, resumed or modified, and requests coming from the server
 (approvals and the like) are declined.
 
 STATUS: written from the published protocol description and exercised against a
-synthetic server in tests/. It has not been run against a real Codex install —
-see docs/verification.md. Every call is wrapped so that any mismatch simply makes
+synthetic server in tests/. The paging used by `read_history` (cursor / nextCursor,
+`itemsView: "full"`, `thread/items/list` with a `turnId` per entry) follows
+https://learn.chatgpt.com/docs/app-server as read on 2026-11-18. None of it has been
+run against a real Codex install — see docs/verification.md. Every call is wrapped so that any mismatch simply makes
 the provider fall back to the .jsonl files.
 """
 from __future__ import annotations
@@ -197,3 +201,59 @@ class AppServer:
         result = self.request("thread/read", {"threadId": thread_id, "includeTurns": True})
         thread = result.get("thread") if isinstance(result.get("thread"), dict) else result
         return turns_from_api((thread.get("turns") or [])[-limit:])
+
+    # ------------------------------------------------------------ whole history
+    def read_history(self, thread_id, page=50, max_turns=5000):
+        """Every turn of a thread, oldest first, as raw turn objects with their items
+        (messages, command runs with output, file changes, tool calls).
+
+        Pages through `thread/turns/list`; a server that does not know `itemsView`
+        is asked without it, and turns that arrive without items are completed from
+        `thread/items/list`. Older servers: `thread/read` with includeTurns."""
+        params = {"threadId": thread_id, "limit": page, "sortDirection": "asc", "itemsView": "full"}
+        turns, cursor = [], None
+        try:
+            while len(turns) < max_turns:
+                try:
+                    result = self.request("thread/turns/list", dict(params, cursor=cursor) if cursor else params)
+                except AppServerError as error:
+                    if error.code == INVALID_PARAMS and "itemsView" in params:
+                        del params["itemsView"]
+                        continue
+                    raise
+                items = [item for item in (result.get("data") or result.get("turns") or []) if isinstance(item, dict)]
+                turns += items
+                cursor = result.get("nextCursor")
+                if not cursor or not items:
+                    break
+        except AppServerError as error:
+            if error.code not in (METHOD_NOT_FOUND, INVALID_PARAMS):
+                raise
+            result = self.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+            thread = result.get("thread") if isinstance(result.get("thread"), dict) else result
+            return [turn for turn in (thread.get("turns") or []) if isinstance(turn, dict)][:max_turns]
+        if turns and not any(turn.get("items") for turn in turns):
+            self._fill_items(thread_id, turns, page)
+        return turns[:max_turns]
+
+    def _fill_items(self, thread_id, turns, page):
+        """Attach the items of `thread/items/list` to the turns they belong to. A server
+        without item paging leaves the turns as they are."""
+        by_id = {str(turn.get("id")): turn for turn in turns if turn.get("id")}
+        cursor = None
+        for _ in range(2000):
+            params = {"threadId": thread_id, "limit": page * 4, "sortDirection": "asc"}
+            try:
+                result = self.request("thread/items/list", dict(params, cursor=cursor) if cursor else params)
+            except AppServerError as error:
+                if error.code is None:
+                    raise
+                return
+            entries = [entry for entry in (result.get("data") or []) if isinstance(entry, dict)]
+            for entry in entries:
+                turn = by_id.get(str(entry.get("turnId")))
+                if turn is not None and isinstance(entry.get("item"), dict):
+                    turn.setdefault("items", []).append(entry["item"])
+            cursor = result.get("nextCursor")
+            if not cursor or not entries:
+                return

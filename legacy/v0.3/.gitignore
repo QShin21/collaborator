@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# PyInstaller output (root only: a package folder may legitimately be called "build" or "data")
+/build/
+/dist/
+/release/
+*.spec
+
+# The founder's original brief is kept in the working copy only. It is not published
+# with the repository; docs/product-design.md is the plan that is.
+docs/product-brief-original.md
+
+# Task notes handed to a coding agent in this working copy; never part of a commit.
+.*-task.txt
+
+# local data and secrets never belong in the repository
+.env
+/data/
+settings.json
+state.json
+events.jsonl
+*.log

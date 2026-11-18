@@ -1,6 +1,6 @@
-"""Settings, key storage and local records."""
+"""Settings, the secret box and the local log. Temp folders and made-up keys only."""
 import json
-import re
+import os
 import shutil
 import sys
 import tempfile
@@ -9,9 +9,9 @@ from pathlib import Path
 
 import safety  # noqa: F401  (keeps tests away from real user data)
 
-from banxing import config, levels as lv, secretbox
+from banxing import config, secretbox
 from banxing.config import Settings
-from banxing.store import MAX_LOG_BYTES, Store
+from banxing.store import MAX_LOG_BYTES, Store, wipe
 
 
 class TempCase(unittest.TestCase):
@@ -24,68 +24,57 @@ class TempCase(unittest.TestCase):
 
 
 class SettingsTests(TempCase):
-    def test_fresh_install_has_no_model_and_follows(self):
+    def test_a_fresh_install_has_no_model_and_sends_nothing(self):
         settings = self.settings()
-        self.assertFalse(settings.model_config().ready)
-        self.assertTrue(settings.get("follow"))
-        self.assertTrue(settings.get("use_context"))
-        self.assertEqual(settings.tuning().pause, 1.5)
-        self.assertEqual(settings.tuning().ignore_after, 2.0)
-        self.assertEqual((lv.WINDOW, lv.THRESHOLD, lv.READY_NEEDED), (6, 4, 5))     # rules, not settings
-        self.assertEqual(settings.get("schema"), config.SETTINGS_SCHEMA)
+        self.assertEqual((settings.get("provider"), settings.model_config().ready, settings.destination()), ("", False, ""))
+        self.assertFalse(settings.path.exists())                                   # nothing written by looking
 
-    def test_values_survive_a_restart_and_junk_is_ignored(self):
+    def test_unknown_keys_and_files_of_other_versions(self):
         settings = self.settings()
-        settings.set(pet_offset=[-80, -200], use_context=False)
-        self.assertEqual(self.settings().get("pet_offset"), [-80, -200])
-        self.assertFalse(self.settings().get("use_context"))
+        settings.path.parent.mkdir(parents=True, exist_ok=True)
+        # A file of the draft-routes versions: the model fields carry over, the rest is dropped.
+        settings.path.write_text(json.dumps({"schema": 2, "provider": "mock", "follow": False, "pause_seconds": 9,
+                                             "unknown_key": 1}), encoding="utf-8")
+        old = self.settings()
+        self.assertEqual((old.get("provider"), old.get("follow"), old.get("unknown_key")), ("mock", None, None))
+        settings.path.write_text(json.dumps({"schema": 99, "provider": "mock"}), encoding="utf-8")
+        self.assertEqual(self.settings().get("provider"), "")                      # a newer file is not guessed at
+        settings.path.write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.settings().get("provider"), "")
         with self.assertRaises(KeyError):
-            settings.set(surprise=1)
-        settings.path.write_text('{"follow": false, "unknown_key": 1}', encoding="utf-8")
-        again = self.settings()
-        self.assertFalse(again.get("follow"))
-        self.assertNotIn("unknown_key", again.data)
-        settings.path.write_text("{ this is not json", encoding="utf-8")
-        self.assertTrue(self.settings().get("follow"))
+            settings.set(no_such_setting=1)
+        self.assertEqual(settings.number("watch_poll_seconds", 1.0, 120.0), 5.0)
+        settings.data["watch_poll_seconds"] = "soon"
+        self.assertEqual(settings.number("watch_poll_seconds", 1.0, 120.0), 5.0)
 
-    def test_tuning_is_clamped_to_sane_values(self):
+    def test_the_model_dialog_validates_before_it_saves(self):
         settings = self.settings()
-        settings.set(pause_seconds=0, ignore_after_seconds="oops")
-        self.assertEqual(settings.tuning().pause, 0.4)
-        self.assertEqual(settings.tuning().ignore_after, 2.0)
+        for fields, problem in ((dict(provider="anthropic"), "api_key"),
+                                (dict(provider="openai", base_url="http://gateway.example.com/v1", api_key="k"), "base_url"),
+                                (dict(provider="telepathy", api_key="k"), "provider")):
+            with self.assertRaises(ValueError) as caught:
+                settings.save_model(**fields)
+            self.assertEqual(str(caught.exception), problem)
+        self.assertFalse(settings.path.exists())
+        model = settings.save_model("anthropic", api_key="  key-one  ", effort="high")
+        self.assertEqual((model.ready, model.api_key, model.effort, model.host), (True, "key-one", "high", "api.anthropic.com"))
+        self.assertEqual(settings.save_model("anthropic", effort="whatever").effort, "medium")
 
-    def test_saving_a_model_needs_a_key_and_a_safe_endpoint(self):
-        settings = self.settings()
-        with self.assertRaises(ValueError) as caught:
-            settings.save_model("anthropic")
-        self.assertEqual(str(caught.exception), "api_key")
-        with self.assertRaises(ValueError) as caught:
-            settings.save_model("openai", base_url="http://gateway.example.com/v1", api_key="k")
-        self.assertEqual(str(caught.exception), "base_url")
-        with self.assertRaises(ValueError) as caught:
-            settings.save_model("telepathy", api_key="k")
-        self.assertEqual(str(caught.exception), "provider")
-        model = settings.save_model("anthropic", api_key="  key-one  ", effort="medium")
-        self.assertTrue(model.ready)
-        self.assertEqual((model.api_key, model.effort, model.host), ("key-one", "medium", "api.anthropic.com"))
-
-    def test_saved_key_never_follows_a_changed_endpoint(self):
+    def test_a_saved_key_never_follows_a_changed_endpoint(self):
         settings = self.settings()
         settings.save_model("openai", base_url="https://gateway.example.com/v1", api_key="key-one")
-        # Same endpoint, key field left blank: the key is kept.
-        self.assertEqual(settings.save_model("openai", base_url="https://gateway.example.com/v1/",
-                                             model="m2").api_key, "key-one")
+        self.assertEqual(settings.save_model("openai", base_url="https://gateway.example.com/v1/", model="m2").api_key,
+                         "key-one")                                               # same endpoint, key left blank
         for provider, url in (("openai", "https://evil.example.net/v1"), ("openai", ""), ("anthropic", "")):
             with self.assertRaises(ValueError) as caught:
                 settings.save_model(provider, base_url=url)
             self.assertEqual(str(caught.exception), "api_key_again")
-        # Nothing changed on failure.
         again = self.settings().model_config()
-        self.assertEqual((again.host, again.api_key), ("gateway.example.com", "key-one"))
+        self.assertEqual((again.host, again.api_key), ("gateway.example.com", "key-one"))     # nothing changed on failure
         moved = settings.save_model("openai", base_url="https://other.example.net/v1", api_key="key-two")
         self.assertEqual((moved.host, moved.api_key), ("other.example.net", "key-two"))
 
-    def test_key_is_not_written_in_the_clear(self):
+    def test_the_key_is_not_written_in_the_clear(self):
         settings = self.settings()
         settings.save_model("anthropic", api_key="sk-ant-very-secret-value")
         raw = settings.path.read_text(encoding="utf-8")
@@ -94,139 +83,129 @@ class SettingsTests(TempCase):
         if sys.platform == "win32":
             self.assertTrue(secretbox.is_encrypted(json.loads(raw)["api_key"]))
         else:
-            self.assertEqual(settings.path.stat().st_mode & 0o077, 0)     # private to the user
+            self.assertEqual(settings.path.stat().st_mode & 0o077, 0)             # private to the user
+        self.assertTrue(settings.save_model("mock").ready)                        # the offline demo forgets the key
+        self.assertEqual((settings.get("api_key"), settings.destination()), ("", ""))
 
-    def test_offline_demo_needs_no_key_and_forgets_the_old_one(self):
+    def test_a_general_consent_names_a_destination_and_lapses_when_it_changes(self):
         settings = self.settings()
-        settings.save_model("anthropic", api_key="key-one")
-        self.assertTrue(settings.save_model("mock").ready)
-        self.assertEqual(settings.get("api_key"), "")
-        self.assertEqual(settings.destination(), "")
-
-    def test_consent_names_a_destination_and_lapses_when_it_changes(self):
-        settings = self.settings()
-        self.assertTrue(settings.consented())                 # nothing configured: nothing is sent
+        self.assertTrue(settings.consented())                                     # nothing configured: nothing is sent
         settings.save_model("openai", base_url="https://gateway.example.com/v1", api_key="k")
         self.assertFalse(settings.consented())
-        settings.give_consent()
-        self.assertTrue(self.settings().consented())
+        self.assertFalse(settings.give_consent("openai|https://somewhere.else.example"))   # not what was on screen
+        self.assertTrue(settings.give_consent("openai|https://gateway.example.com"))
         settings.save_model("openai", base_url="https://gateway.example.com/v1", model="other-model")
-        self.assertTrue(settings.consented())                 # same destination
+        self.assertTrue(self.settings().consented())                              # same destination
         settings.save_model("openai", base_url="https://elsewhere.example.org/v1", api_key="k2")
         self.assertFalse(settings.consented())
-        settings.give_consent()
-        settings.save_model("mock")
-        self.assertTrue(settings.consented())                 # nothing leaves the machine
 
-    def test_environment_can_supply_the_model_but_never_borrows_the_saved_key(self):
+    def test_the_environment_can_supply_the_model_but_never_borrows_the_saved_key(self):
         self.settings().save_model("anthropic", api_key="saved-key")
         env = {"BANXING_PROVIDER": "openai", "BANXING_BASE_URL": "https://ci.example.com/v1"}
         settings = self.settings(env)
-        self.assertEqual(settings.model_config().api_key, "")
-        self.assertFalse(settings.model_config().ready)
-        self.assertTrue(settings.env_locked)
+        self.assertEqual((settings.model_config().api_key, settings.model_config().ready, settings.env_locked),
+                         ("", False, True))
         env["BANXING_API_KEY"] = "env-key"
         self.assertEqual(self.settings(env).model_config().api_key, "env-key")
         self.assertTrue(self.settings({"BANXING_PROVIDER": "mock"}).model_config().ready)
 
     def test_home_can_be_redirected(self):
-        import os
         old = os.environ.get("BANXING_HOME")
         os.environ["BANXING_HOME"] = str(self.folder / "elsewhere")
         try:
             self.assertEqual(config.home(), self.folder / "elsewhere")
         finally:
-            if old is None:
-                del os.environ["BANXING_HOME"]
-            else:
-                os.environ["BANXING_HOME"] = old
+            os.environ["BANXING_HOME"] = old
 
 
 class SecretTests(unittest.TestCase):
-    def test_round_trip_and_unreadable_values(self):
-        stored = secretbox.protect("值 with ünïcode")
-        self.assertEqual(secretbox.reveal(stored), "值 with ünïcode")
+    def setUp(self):
+        self.saved = (secretbox._on_windows, secretbox._dpapi)
+        self.addCleanup(lambda: setattr(secretbox, "_on_windows", self.saved[0]) or setattr(secretbox, "_dpapi", self.saved[1]))
+
+    def test_round_trip_and_what_is_not_a_stored_secret(self):
+        stored = secretbox.protect("sk-secret-value")
+        self.assertNotIn("sk-secret-value", stored)
+        self.assertEqual(secretbox.reveal(stored), "sk-secret-value")
         self.assertEqual(secretbox.protect(""), "")
-        for junk in ("", "nonsense", "plain:!!!", "dpapi:AAAA", "rot13:abc"):
-            self.assertEqual(secretbox.reveal(junk), "")
+        for bad in ("", "nonsense", "plain:!!!", "dpapi:AAAA" if sys.platform != "win32" else "plain:QUJD"):
+            self.assertEqual(secretbox.reveal(bad), "", bad)
 
     @unittest.skipUnless(sys.platform == "win32", "DPAPI exists on Windows only")
     def test_windows_uses_dpapi(self):
-        stored = secretbox.protect("windows-secret")
+        self.assertTrue(secretbox.is_encrypted(secretbox.protect("value")))
+
+    def test_on_windows_a_failed_encryption_writes_nothing_readable(self):
+        """Windows is simulated by switching the module's platform check."""
+        for failure in (secretbox.SecretError("x"), OSError("no crypt32"), AttributeError("WinDLL"), ValueError("?")):
+            def dpapi(data, protect, failure=failure):
+                raise failure
+            secretbox._on_windows, secretbox._dpapi = (lambda: True), dpapi
+            with self.assertRaises(secretbox.SecretError):
+                secretbox.protect("sk-secret-value")
+        folder = Path(tempfile.mkdtemp(prefix="banxing-secret-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        settings = Settings(folder, environ={})
+        with self.assertRaises(ValueError) as caught:
+            settings.save_model("anthropic", api_key="sk-secret-value")
+        self.assertEqual(str(caught.exception), "encrypt")
+        self.assertFalse(settings.path.exists())                                   # not the key, not the rest either
+        secretbox._dpapi = lambda data, protect: data[::-1]                        # a stand-in "cipher" that works
+        stored = secretbox.protect("sk-secret-value")
         self.assertTrue(stored.startswith("dpapi:"))
-        self.assertEqual(secretbox.reveal(stored), "windows-secret")
+        self.assertEqual(secretbox.reveal(stored), "sk-secret-value")
+        self.assertEqual(secretbox.reveal("plain:c2stc2VjcmV0"), "")               # a readable value is not accepted there
 
 
 class StoreTests(TempCase):
-    def test_level_state_survives_a_restart(self):
-        store = Store(self.folder)
-        self.assertEqual(store.load_levels(), lv.Levels())
-        state = lv.Levels()
-        for index in range(4):
-            state, _ = lv.record(state, f"m{index}", lv.IGNORE, now=1.0)
-        self.assertEqual(state.level, lv.HINT)
-        store.save_levels(state)
-        self.assertEqual(Store(self.folder).load_levels(), state)
-        store.state_path.write_text("[]", encoding="utf-8")
-        self.assertEqual(store.load_levels(), lv.Levels())
+    def test_the_log_takes_numbers_and_code_style_names_only(self):
+        log = Store(self.folder, wall=lambda: 12.5)
+        log.log("watch_audit", {"requests": 3, "ok": True, "seconds": 1.25, "kind": "premise", "empty": None,
+                                "title": "「同一份索引」只是说过", "claim": "the main model said so", "short": "好",
+                                "path": "C:\\Users\\me\\talk.json", "list": [1, 2]})
+        event = log.events()[0]
+        self.assertEqual({key for key in event if key not in ("t", "v", "event")},
+                         {"requests", "ok", "seconds", "kind", "empty"})           # every bit of prose was refused
+        self.assertEqual((event["event"], event["t"]), ("watch_audit", 12.5))
+        log.log("x" * 80)
+        self.assertEqual(len(log.events()[-1]["event"]), 40)
 
-    def test_a_generation_one_state_file_is_carried_over(self):
-        store = Store(self.folder)
-        store.state_path.write_text(json.dumps({"frequency": {"mode": "critical", "by": "user"}}), encoding="utf-8")
-        self.assertEqual(store.load_levels().level, lv.WALK)
-        store.state_path.write_text(json.dumps({"schema": 99, "levels": {"level": "walk"}}), encoding="utf-8")
-        self.assertEqual(store.load_levels(), lv.Levels())          # written by a newer version: not guessed at
+    def test_the_log_is_capped_and_survives_damage(self):
+        log = Store(self.folder)
+        log.log_path.parent.mkdir(parents=True, exist_ok=True)
+        log.log_path.write_text("x" * (MAX_LOG_BYTES + 10) + "\n", encoding="utf-8")
+        log.log("after")
+        self.assertTrue(log.log_path.with_suffix(".1.jsonl").exists())
+        self.assertEqual([event["event"] for event in log.events()], ["after"])
+        with open(log.log_path, "a", encoding="utf-8") as stream:
+            stream.write("not json\n")
+        self.assertEqual(len(log.events()), 1)
+        self.assertEqual(Store(self.folder / "nowhere").events(), [])
 
-    def test_log_keeps_numbers_and_names_and_drops_anything_text_like(self):
-        store = Store(self.folder, wall=lambda: 12.5)
-        store.log("shown", {"wait": 1.25, "context": True, "mode": "every", "reason": "app_switch",
-                            "draft": "想在阳台做一个三层的花架，我没做过木工。",
-                            "short": "做个花架", "english": "fix the login page", "path": "C:\\Users\\me\\a.txt",
-                            "note": "two\nlines", "nested": {"a": 1}, "long": "x" * 41})
-        (event,) = store.events()
-        self.assertEqual(event["wait"], 1.25)
-        self.assertEqual(event["mode"], "every")
-        self.assertEqual(event["reason"], "app_switch")
-        self.assertEqual(event["t"], 12.5)
-        # Not by length: a draft of four characters is still a draft.
-        for dropped in ("draft", "short", "english", "path", "note", "nested", "long"):
-            self.assertNotIn(dropped, event)
+    def test_the_summary_counts_what_the_user_made_of_it(self):
+        log = Store(self.folder)
+        self.assertEqual((log.summary()["audits"], log.summary()["wrong_rate"]), (0, None))
+        log.log("watch_audit", {"ok": True, "manual": False, "requests": 3, "chars": 900, "looks": 1, "searches": 2,
+                                "independent": True, "seconds": 4.0})
+        log.log("watch_audit", {"ok": False, "manual": True, "requests": 1, "chars": 100, "seconds": 2.0})
+        for action, why in (("show", "premise"), ("show", "manual"), ("quiet", "muted"), ("quiet", "too_late")):
+            log.log("watch_decided", {"action": action, "why": why})
+        for event in ("watch_took_back", "watch_intended", "watch_wrong", "watch_wrong", "watch_resolved"):
+            log.log(event, {"kind": "premise"})
+        numbers = log.summary()
+        self.assertEqual((numbers["audits"], numbers["asked_for"], numbers["failed"], numbers["requests"],
+                          numbers["chars_sent"], numbers["looked_back"], numbers["searches"],
+                          numbers["independent_readings"]), (2, 1, 1, 4, 1000, 1, 2, 1))
+        self.assertEqual((numbers["bubbles"], numbers["taken_back"], numbers["intended"], numbers["called_wrong"],
+                          numbers["resolved_later"], numbers["held_back"], numbers["wrong_rate"]), (1, 1, 1, 2, 1, 2, 0.5))
 
-    def test_every_string_the_app_logs_is_a_plain_name(self):
-        """What follow.py and the controller hand to the log, found in the source."""
-        from banxing import store as store_module
-        root = Path(store_module.__file__).resolve().parent
-        logged = set()
-        for name in ("follow.py", "controller.py", "cli.py"):
-            text = (root / name).read_text(encoding="utf-8")
-            for call in re.findall(r"""(?:Log|store\.log)\(\s*["']([^"']+)["']""", text):
-                logged.add(call)
-        self.assertGreater(len(logged), 12)
-        for name in logged:
-            self.assertTrue(store_module._NAME.fullmatch(name), name)
-
-    def test_log_rotates_instead_of_growing_forever(self):
-        store = Store(self.folder)
-        store.log_path.parent.mkdir(parents=True, exist_ok=True)
-        store.log_path.write_text("x" * (MAX_LOG_BYTES + 10), encoding="utf-8")
-        store.log("start")
-        self.assertLess(store.log_path.stat().st_size, 1000)
-        self.assertTrue(store.log_path.with_suffix(".1.jsonl").exists())
-
-    def test_summary_counts_a_trial(self):
-        store = Store(self.folder)
-        for event, data in (("analyze", {}), ("shown", {"wait": 2.0}), ("adopted", {}), ("analyze", {}),
-                            ("shown", {"wait": 4.0}), ("dismissed", {}), ("analyze", {}), ("late", {}),
-                            ("analyze", {}), ("standby", {}), ("analyze", {}), ("shown", {"wait": 3.0}),
-                            ("sent_original", {})):
-            store.log(event, data)
-        summary = store.summary()
-        self.assertEqual((summary["analysed"], summary["shown"], summary["adopted"], summary["dismissed"],
-                          summary["late"], summary["standby"], summary["sent_original"]),
-                         (5, 3, 1, 1, 1, 1, 1))
-        self.assertEqual((summary["incomplete"], summary["in_time_rate"]), (0, 0.75))
-        self.assertEqual(summary["median_wait_seconds"], 3.0)
-        self.assertIsNone(Store(self.folder / "empty").summary()["median_wait_seconds"])
+    def test_wipe_removes_what_the_app_keeps_and_nothing_else(self):
+        for name in ("settings.json", "events.jsonl", "banxing.log", "state.json", "calibration.json", "mine.txt"):
+            (self.folder / name).write_text("x", encoding="utf-8")
+        (self.folder / "vault").mkdir()
+        (self.folder / "vault" / "watch.bin").write_text("x", encoding="utf-8")
+        self.assertEqual(wipe(self.folder), 6)
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["mine.txt"])
 
 
 if __name__ == "__main__":

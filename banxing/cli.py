@@ -1,17 +1,16 @@
 """Entry points.
 
-  Banxing.exe                 run the pet
-  ... --selftest [--report F] [--require tk,uia]
+  Banxing.exe                         run the app
+  ... --watch PATH [--conversation ID] [--list] [--from-turn N] [--stepwise] [--agree ORIGIN]
+                                      read one conversation the user points at, print its
+                                      ledger and what the supervising model finds;
+                                      --stepwise replays it turn by turn
+  ... --replay [--limit N] [--report F]
+                                      play the labelled conversations to the watcher turn by
+                                      turn: timing, aim, interruptions, one-shot control
+  ... --selftest [--report F] [--require tk,win32]
                                       check that this build works on this machine;
                                       exit code 0 only if the required checks pass
-  ... --probe [--fill] [--wait N] [--report F]
-                                      compatibility report for the Codex window in
-                                      front (switch to it within N seconds)
-  ... --demo "draft" [--mode critical] [--agree ORIGIN]
-                                      print three suggestions for a draft; sends it
-                                      only to a destination that has been agreed to
-  ... --eval [--limit N] [--report F] run the evaluation scenarios through the configured
-                                      model and check the structure of every answer
   ... --summary                       numbers from the local trial log
   ... --version
 """
@@ -24,11 +23,10 @@ import logging
 import logging.handlers
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
-from . import APP_ID, __version__, calibration, examples, levels, suggest
+from . import APP_ID, __version__
 from .config import Settings, home
 from .store import Store
 
@@ -37,7 +35,7 @@ log = logging.getLogger("banxing")
 
 
 def setup_logging(folder):
-    """A small rotating log in the data folder. Draft and chat text are never logged."""
+    """A small rotating log in the data folder. Conversation text is never logged."""
     try:
         folder.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
@@ -66,58 +64,35 @@ def write_report(path, data):
 
 
 # ------------------------------------------------------------------ run
-def build(settings, store, view, client, executor_factory, context=None, capabilities=None):
-    """Wire the application. Shared by the real run and the self-test (which passes
-    its own `context` so that it never looks at the user's Codex data).
-    `capabilities=None` means: whatever the stored calibration allows."""
-    from .context import ContextProvider
-    from .controller import Controller
-    if context is None:
-        context = ContextProvider(codex_command=settings.get("codex_command") or "",
-                                  sessions_dir=settings.get("sessions_dir") or "")
+def build(settings, store, view, executor, clock=time.monotonic, auditor=None, use_appserver=True):
+    """Wire the application: one Watcher. Shared by the real run, the self-test and
+    the tests (which pass `use_appserver=False` so that no `codex` process is started)."""
+    from .context import appserver
+    from .watch.driver import Watcher
     holder = {}
-    suggester = suggest.Suggester(settings.model_config, context=context, permit=settings.consented,
-                                  timeout=settings.number("model_timeout_seconds", 5.0, 120.0),
-                                  about=lambda: holder["controller"].for_request())
-    executor = executor_factory(lambda snap: holder["controller"].on_snapshot(snap))
-    controller = Controller(client, suggester, view, settings, store, executor=executor, context=context,
-                            capabilities=capabilities)
-    holder["controller"] = controller
-    return controller, executor, context
+
+    def server():
+        if not use_appserver:
+            return None
+        if "server" not in holder:
+            command = appserver.find_command(settings.get("codex_command") or "")
+            holder["server"] = appserver.AppServer(command) if command else None
+        return holder["server"]
+
+    watcher = Watcher(settings, store, executor, view, clock, auditor=auditor, server=server)
+    watcher.close_server = lambda: holder.get("server") and holder["server"].close()
+    return watcher
 
 
-def calibrate_simulated(codex, controller):
-    """Walk the calibration against the in-memory Codex, playing the user's part.
-    Used by the self-test and the tests; returns the stored entry."""
-    results, memo = {}, {}
-    for step, _, _ in calibration.STEPS:
-        if step == "read":
-            codex.type(calibration.PHRASE)
-        elif step in ("empty", "fill"):
-            codex.type("")
-        elif step == "focus":
-            codex.type("x")
-        calibration.prepare(codex, step, memo)
-        if step == "chat":
-            codex.type("")
-            codex.switch_chat(codex.chat + "-other")
-        if step == "sessions":
-            codex.visible.setdefault(codex.chat, ["…"])
-        results[step] = calibration.check(codex, step, memo, sleep=lambda seconds: None)
-        if step == "chat":
-            codex.switch_chat(codex.chat[:-len("-other")])
-    return controller.finish_calibration(results, memo)
-
-
-def run_pet():
+def run_app():
     from .ui import strings
     settings = Settings()
     setup_logging(settings.folder)
     strings.set_language(settings.get("language"))
     if WIN:
-        from .hosts import win32
-        win32.enable_dpi_awareness()
-        if not win32.single_instance("Local\\" + APP_ID + "-Banxing"):
+        from . import winshell
+        winshell.enable_dpi_awareness()
+        if not winshell.single_instance("Local\\" + APP_ID + "-Banxing"):
             import tkinter
             from tkinter import messagebox
             root = tkinter.Tk()
@@ -129,120 +104,86 @@ def run_pet():
                 del root
                 gc.collect()
             return 0
-    from .controller import ThreadedExecutor
-    from .hosts import create_client
+    from .executor import ThreadedExecutor
     from .ui.app import PetApp
     store = Store(settings.folder)
-    client = create_client(settings)
     app = PetApp(settings, store)
-    controller, executor, context = build(
-        settings, store, app, client,
-        lambda on_snapshot: ThreadedExecutor(client, on_snapshot, poll=settings.number("poll_seconds", 0.1, 2.0)))
-    app.attach(controller, executor)
-    if client.name == "none":
-        app.pinned = True                      # nothing to follow: stay reachable for paste mode
-        log.warning("no Codex client: %s", getattr(client, "reason", ""))
-    store.log("start", {"client": client.name})
-    executor.start()
-    if controller.setup_reason():
-        app.root.after(700, app.open_model)    # first run: say where drafts go, ask for the model
-    else:
-        app.root.after(700, app.greet)         # says so if this machine is not calibrated yet
+    executor = ThreadedExecutor()
+    watcher = build(settings, store, app, executor)
+    app.attach(watcher, executor)
+    store.log("start")
+    watcher.restore()                          # a ledger the user asked to keep
+    app.root.after(600, app.greet)
     try:
         app.run()
     finally:
-        # Order matters. The watcher is stopped first; then the windows are ended and
-        # freed here, on the thread that made them, while model-call threads may still
-        # be finishing — they must never be the ones to free the Tk interpreter.
-        executor.stop()
+        # The windows are ended and freed here, on the thread that made them, while
+        # worker threads may still be finishing — they must never be the ones to free
+        # the Tk interpreter.
         try:
             app.destroy()
         except Exception:
             log.exception("closing the windows failed")
-        context.close()
+        watcher.close_server()
         store.log("stop")
     return 0
 
 
 # ------------------------------------------------------------------ self-test
-def _check_core(folder):
-    from .controller import Controller, InlineExecutor, View
-    from .hosts.simulated import SimulatedCodex
+def _synthetic(folder):
+    """A conversation written for the self-test, as a file, read back through the
+    same code as a real one."""
+    from .evalkit import replay_cases
+    from .watch import sources
+    case = replay_cases.all_cases()[0]
+    path = Path(folder) / "watch" / "conversation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"title": "self-test", "turns": [
+        {"user": turn["user"], "assistant": turn["model"], "records": turn["records"]}
+        for turn in case["turns"][:4]]}, ensure_ascii=False), encoding="utf-8")
+    kind, listings = sources.listing(path)
+    ref = sources.SourceRef(kind=kind, path=str(path), conversation=listings[0].id)
+    return ref, sources.read(ref)
 
-    class Seen(View):
-        bubble = None
 
-        def show_bubble(self, bubble, snap):
-            self.bubble = bubble
-
-        def hide_bubble(self, reason):
-            self.bubble = None
-
-    codex, view = SimulatedCodex(), Seen()
-    settings = Settings(folder, environ={"BANXING_PROVIDER": "mock"})
-    clock = {"now": 100.0}
-    suggester = suggest.Suggester(settings.model_config)
-    controller = Controller(codex, suggester, view, settings, Store(folder), executor=InlineExecutor(),
-                            clock=lambda: clock["now"])
-    draft = examples.get("furniture")["draft"]
-
-    def pause_on(text):
-        codex.type(text)
-        for _ in range(10):
-            clock["now"] += 0.25
-            controller.on_snapshot(codex.snapshot(clock["now"]))
-
-    pause_on(draft)
-    if view.bubble is not None:
-        raise RuntimeError("the input box was read without a calibration")
-    entry = calibrate_simulated(codex, controller)
-    if entry["verdict"] != "passed":
-        raise RuntimeError(f"calibration against the simulator: {entry['verdict']}")
-    pause_on("")
-    pause_on(draft)
-    if view.bubble is None or len(view.bubble.routes) != 3:
-        raise RuntimeError("no bubble after the pause")
-    prompt = view.bubble.routes[0].prompt
-    if not prompt.startswith(draft):
-        raise RuntimeError("the prompt does not start with the user's own words")
-    controller.pick(0)
-    if codex.draft != prompt or codex.sent:
-        raise RuntimeError("the click did not fill the prompt")
-    if [f.outcome for f in controller.machine.levels.recent] != [levels.ADOPT]:
-        raise RuntimeError("the adoption was not counted")
-    return {"rows": [r.approach for r in suggest.from_example("furniture").routes],
-            "capabilities": entry["capabilities"]}
+def _check_watch(folder):
+    """Read a synthetic conversation, audit it with the offline stand-in — including
+    a look back, a search and a blind reading — and keep the ledger."""
+    from .llm import ModelConfig
+    from .watch import audit as au, session as ss, vault
+    ref, transcript = _synthetic(folder)
+    config = ModelConfig(provider="mock")
+    session, auditor = ss.Session(destination=config.destination), au.Auditor(lambda: config)
+    queue, bubble = list(session.observe(transcript)), None
+    while queue:
+        effect = queue.pop(0)
+        if isinstance(effect, ss.Run):
+            queue += session.audited(effect.job.id, auditor.run(effect.job))
+        elif isinstance(effect, ss.ShowBubble):
+            bubble = effect.bubble
+    if bubble is None or not bubble.finding.basis or not bubble.finding.ask:
+        raise RuntimeError("no traceable concern for the synthetic conversation")
+    trace = session.last.trace
+    if not (trace.looks and trace.searches and trace.independent):
+        raise RuntimeError("the audit did not go back to look, search and read blind")
+    if not any(a.status == "unchecked" for a in session.ledger.anchors):
+        raise RuntimeError("the ledger does not mark the unchecked claim")
+    vault.save(Path(folder) / "watch", ref, session)
+    stored = vault.load(Path(folder) / "watch")
+    if stored is None or stored[1].ledger != session.ledger:
+        raise RuntimeError("the stored ledger did not come back as it was saved")
+    return {"concern": bubble.finding.kind, "requests": session.usage.requests, "looks": trace.looks}
 
 
 def _check_prompts(folder):
+    from .watch import audit
     versions = {}
-    for mode in (levels.LEAD, levels.HINT):
-        text, version = suggest.system_prompt(mode)
-        if "JSON" not in text or len(text) < 500 or not version:
-            raise RuntimeError("a prompt file is missing, truncated or has no version line")
-        versions[mode] = version
+    for name in ("audit", "blind"):
+        text, version = audit.system_prompt(name)
+        if "JSON" not in text or len(text) < 300 or not version:
+            raise RuntimeError(f"the {name} prompt is missing, truncated or has no version line")
+        versions[name] = version
     return versions
-
-
-def _check_context(folder):
-    from .context import ChatSignals, ContextProvider
-    sessions = Path(folder) / "sessions" / "2026" / "01" / "01"
-    sessions.mkdir(parents=True, exist_ok=True)
-    thread = "00000000-0000-4000-8000-000000000001"
-    lines = [
-        {"type": "session_meta", "payload": {"id": thread, "cwd": "C:\\demo"}},
-        {"type": "event_msg", "payload": {"type": "user_message", "message": "自检：帮我做一个示例页面"}},
-        {"type": "event_msg", "payload": {"type": "agent_message", "message": "自检：已生成 demo.html。\n\n页面使用示例数据。"}},
-        {"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "自检：已生成 demo.html。\n\n页面使用示例数据。"}},
-    ]
-    (sessions / f"rollout-2026-01-01T00-00-00-{thread}.jsonl").write_text(
-        "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n", encoding="utf-8")
-    provider = ContextProvider(sessions_dir=str(Path(folder) / "sessions"), use_appserver=False)
-    signals = ChatSignals(texts=("自检：帮我做一个示例页面", "自检：已生成 demo.html。", "页面使用示例数据。"))
-    found = provider.excerpt(signals, "把页面改成深色")
-    if found is None or found.thread_id != thread:
-        raise RuntimeError("the synthetic chat was not recognised")
-    return {"turns": found.turns, "source": found.source}
 
 
 def _check_secretbox(folder):
@@ -254,11 +195,10 @@ def _check_secretbox(folder):
 
 
 def _check_tk(folder):
-    """Build the real windows, show a bubble, open every dialog, fill once.
+    """Build the real windows, show a bubble, open every dialog, answer the bubble.
 
     When this returns, nothing of Tk is left in memory: the interpreter was ended and
-    freed on this thread. The checks that follow start other threads (UI Automation
-    runs on its own), and a Tk interpreter freed from one of those aborts the process."""
+    freed on this thread (a Tk interpreter freed from another thread aborts the process)."""
     try:
         return _tk_walkthrough(folder)
     finally:
@@ -266,91 +206,49 @@ def _check_tk(folder):
 
 
 def _tk_walkthrough(folder):
-    from .controller import InlineExecutor
-    from .hosts.simulated import SimulatedCodex
+    from .executor import InlineExecutor
     from .ui import strings
     from .ui.app import PetApp
     strings.set_language("zh")
     settings = Settings(Path(folder) / "ui", environ={"BANXING_PROVIDER": "mock"})
-    codex = SimulatedCodex()
-    app = PetApp(settings, Store(settings.folder), use_tray=False)
+    store = Store(settings.folder)
+    app = PetApp(settings, store, use_tray=False)
     try:
-        from .context import ContextProvider
-        empty = ContextProvider(sessions_dir=str(Path(folder) / "no-sessions"), use_appserver=False)
-        controller, _, context = build(settings, Store(settings.folder), app, codex,
-                                       lambda on_snapshot: InlineExecutor(), context=empty,
-                                       capabilities=codex.capabilities())
-        app.attach(controller, None)
-        codex.type(examples.get("software")["draft"])
-        now = 10.0
-        for _ in range(10):
-            now += 0.25
-            controller.clock = lambda now=now: now
-            controller.on_snapshot(codex.snapshot(now))
-            app.root.update()
-        if app.bubble is None:
-            raise RuntimeError("the bubble was not shown")
-        app._toggle_preview(0)
+        watcher = build(settings, store, app, InlineExecutor(), use_appserver=False)
+        app.attach(watcher, None)
+        app.place()
+        ref, transcript = _synthetic(folder)
+        problem = watcher.start(ref, transcript, "")
+        app.root.update()
+        if problem or app.bubble is None or not app.bubble_window.winfo_viewable():
+            raise RuntimeError(f"the bubble was not shown ({problem or 'no bubble'})")
+        app._toggle_sources()
         app.root.update()
         size = (app.bubble_window.winfo_width(), app.bubble_window.winfo_height())
-        visible = bool(app.bubble_window.winfo_viewable()) and bool(app.pet.winfo_viewable())
-        app.status("error", "timeout")
-        app.offer_copy("x", "failed")
-        app._build_menu(__import__("banxing.ui.viewmodel", fromlist=["x"]).menu_items(controller.menu()))
-        for opener in (app.open_model, app.open_paste, app.open_probe, app.open_aboutme, app.open_evidence,
-                       app.open_calibration):
+        app._build_menu(__import__("banxing.ui.viewmodel", fromlist=["x"]).menu_items(watcher.state()))
+        for opener in (app.open_model, app.open_watch, app.open_ledger):
             opener()
             app.root.update()
         for window in list(app.dialog_windows):
             window.destroy()
         window = opener = None
         app.root.update()
-        controller.pick(0)
+        app._copy_ask()
         app.root.update()
-        if codex.draft == examples.get("software")["draft"]:
-            raise RuntimeError("clicking a row did not fill the prompt")
-        if not visible or min(size) < 40:
+        marks = watcher.session.ledger.marks
+        if app.bubble is not None or not marks or marks[-1].state != "asked":
+            raise RuntimeError("copying the question did not close the bubble and note it")
+        if min(size) < 40:
             raise RuntimeError(f"the bubble is not on screen (size {size})")
-        context.close()
+        watcher.stop()
         return {"bubble": list(size), "scale": round(app.scale, 2)}
     finally:
         app.destroy()
 
 
 def _check_win32(folder):
-    import ctypes
-    import os
-    from .hosts import win32
-    name = win32.process_name(os.getpid())
-    if not name.endswith(".exe"):
-        raise RuntimeError(f"unexpected process name {name!r}")
-    front = win32.foreground_window()
-    return {"process": name, "input_size": ctypes.sizeof(win32.INPUT),
-            "foreground": win32.process_name(win32.window_pid(front)) if front else "",
-            "clipboard": win32.clipboard_snapshot()[0], "ime_like": len(win32.ime_like_windows())}
-
-
-def _check_uia(folder):
-    """UI Automation must load and answer — on its own thread, as in the real run."""
-    result = {}
-
-    def work():
-        try:
-            from .hosts.profile import Profile
-            from .hosts.uia import WindowsCodexClient
-            client = WindowsCodexClient(Profile.default())
-            client.open()
-            snap = client.snapshot(time.monotonic())
-            result["ok"] = {"foreground": snap.foreground, "problem": snap.problem}
-            client.close()
-        except Exception as error:
-            result["error"] = f"{type(error).__name__}: {error}"
-    thread = threading.Thread(target=work, name="uia-check")
-    thread.start()
-    thread.join(30)
-    if "ok" not in result:
-        raise RuntimeError(result.get("error", "timed out"))
-    return result["ok"]
+    from . import winshell
+    return {"dpi": bool(winshell.enable_dpi_awareness())}
 
 
 def _check_tray(folder):
@@ -360,11 +258,11 @@ def _check_tray(folder):
 
 
 def selftest(report_path="", require=()):
-    checks = [("core", _check_core), ("prompts", _check_prompts), ("context", _check_context),
-              ("secretbox", _check_secretbox), ("tk", _check_tk), ("tray", _check_tray)]
+    checks = [("watch", _check_watch), ("prompts", _check_prompts), ("secretbox", _check_secretbox),
+              ("tk", _check_tk), ("tray", _check_tray)]
     if WIN:
-        checks += [("win32", _check_win32), ("uia", _check_uia)]
-    required = {"core", "prompts", "context", "secretbox"} | set(require)
+        checks.append(("win32", _check_win32))
+    required = {"watch", "prompts", "secretbox"} | set(require)
     report = {"version": __version__, "system": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
               "python": sys.version.split()[0], "checks": {}}
     with tempfile.TemporaryDirectory(prefix="banxing-selftest-") as folder:
@@ -388,116 +286,132 @@ def selftest(report_path="", require=()):
     return 0 if report["ok"] else 1
 
 
-# ------------------------------------------------------------------ probe / demo / summary
-def probe(report_path="", try_fill=False, wait=15.0):
-    from .hosts import create_client
-    from .ui import viewmodel
-    settings = Settings()
-    client = create_client(settings)
-    client.open()
-    emit(f"Switch to the Codex window within {int(wait)} seconds…")
-    deadline = time.monotonic() + wait
-    while time.monotonic() < deadline:
-        if client.snapshot(time.monotonic()).foreground:
-            break
-        time.sleep(0.25)
-    from .context import ContextProvider
-    provider = ContextProvider(codex_command=settings.get("codex_command") or "",
-                               sessions_dir=settings.get("sessions_dir") or "")
-    appserver, sessions = provider.available()
-    context = {"appserver": appserver, "sessions": sessions}
-    # Waiting for the window above looked at nothing inside it. The report itself is
-    # what the user asked for on the command line: reading is allowed for its duration.
-    with client.authorized():
-        report = client.probe(try_fill=try_fill)
-        try:
-            signals = client.signals()
-            if signals is not None:
-                provider.excerpt(signals, "")
-                context.update(provider.last)
-        except Exception as error:
-            context["error"] = type(error).__name__
-        finally:
-            provider.close()
-            client.close()
-    emit(viewmodel.probe_text(report, context, __version__))
-    write_report(report_path, {"version": __version__, "report": report, "context": context})
-    return 0
-
-
-def demo(draft, mode, agree=""):
-    settings = Settings()
-    config = settings.model_config()
-    if not config.ready:
-        emit("No model configured. Set BANXING_PROVIDER=mock for the offline stand-in.")
-        return 2
-    emit(f"model: {config.provider} / {config.model_name}" + (f" @ {config.origin}" if config.origin else ""))
-    if agree and config.destination:
-        # The origin has to be typed out: consent is for a named destination.
-        if agree.strip().rstrip("/").casefold() != config.origin.casefold() or not settings.give_consent(
-                config.destination):
-            emit(f"--agree does not name where the draft would be sent ({config.origin}); nothing was sent.")
-            return 3
-    if not settings.consented(config):
-        emit(f"The draft would be sent to {config.origin}. Nothing was sent.\n"
-             f"Agree in the pet's model settings, or repeat the command with: --agree {config.origin}")
-        return 3
-    outcome = suggest.Suggester(lambda: config, permit=settings.consented).analyze(draft, mode)
-    if outcome.error:
-        emit(f"error: {outcome.error} {outcome.detail}")
-        return 1
-    if not outcome.task:
-        emit("(not a task: nothing to suggest)")
-        return 0
-    if not outcome.show:
-        emit(f"(standby{', ready to send as it is' if outcome.ready else ''}) {outcome.reason}")
-        return 0
-    if outcome.reason:
-        emit(outcome.reason)
-    for item in outcome.hints:
-        emit(f"\n{'？' if item.ask else '＋'} {item.label}\n   {item.addition}")
-    for index, item in enumerate(outcome.routes, 1):
-        emit(f"\n{index}. [{'主线' if item.main else '支线'} · {item.kind}] {item.approach} — 拿到{item.deliverable}"
-             + (f"\n   因为：{item.why}" if item.why else "")
-             + (f"\n   ⚠ {', '.join(item.caution)}" if item.caution else "")
-             + f"\n   适用：{item.fits}\n   {item.prompt}\n   拿到后：{item.next}")
-    emit(f"\n(prompt {outcome.prompt_version}, {outcome.seconds:.1f}s)")
-    return 0
-
-
-def run_eval(report_path="", limit=0):
-    """Run the scenario set through the configured model and check each answer's
-    structure. With the offline stand-in this proves the plumbing, nothing else."""
-    from .evalkit import run as eval_run
+# ------------------------------------------------------------------ replay / watch / summary
+def run_replay(report_path="", limit=0):
+    """Play the labelled conversations to the watcher turn by turn. With the offline
+    stand-in this proves the plumbing, nothing else."""
+    from .evalkit import replay
     settings = Settings()
     config = settings.model_config()
     if not config.ready:
         emit("No model configured. Set BANXING_PROVIDER=mock for a plumbing-only run.")
         return 2
     if not settings.consented(config):
-        emit(f"The scenarios would be sent to {config.origin}; agree first (model settings, or --demo … --agree).")
+        emit(f"The conversations would be sent to {config.origin}. Nothing was sent.\n"
+             f"Repeat the command with: --agree {config.origin}")
         return 3
-    report = eval_run.run(lambda: config, permit=settings.consented, limit=limit)
-    emit(eval_run.as_text(report))
+    report = replay.run(lambda: config, permit=settings.consented, limit=limit)
+    emit(replay.as_text(report))
     write_report(report_path, report)
     return 0 if report["plumbing_ok"] else 1
 
 
+def watch(path, conversation="", first=1, agree="", list_only=False, report_path="", stepwise=False):
+    """Read one conversation the user points at and audit it — once, as it stands
+    now, or (`stepwise`) replayed turn by turn to see after which turns a bubble
+    would have appeared. The second is how a real conversation is replayed.
+
+    The conversation is sent only to a destination named on this command line
+    (--agree ORIGIN): it is agreed to per conversation, per run. The report file
+    holds numbers and names only — no text of the conversation."""
+    from .evalkit import replay
+    from .ui import strings, viewmodel
+    from .watch import audit as au, session as ss, sources
+    settings = Settings()
+    strings.set_language(settings.get("language"))
+    try:
+        kind, listings = sources.listing(path)
+        if list_only or (len(listings) > 1 and not conversation):
+            for item in listings:
+                emit(f"{item.id}\t{item.turns} turns\t{item.title}")
+            if not list_only:
+                emit("More than one conversation: repeat with --conversation ID.")
+            return 0 if list_only else 2
+        ref = sources.SourceRef(kind=kind, path=str(path), conversation=conversation or listings[0].id)
+        transcript = sources.read(ref)
+    except sources.SourceError as error:
+        emit(f"cannot read the conversation: {error.kind} {error}")
+        return 1
+    config = settings.model_config()
+    if not config.ready:
+        emit("No model configured. Set BANXING_PROVIDER=mock for the offline stand-in.")
+        return 2
+    emit(f"supervising model: {config.provider} / {config.model_name}" + (f" @ {config.origin}" if config.origin else ""))
+    if config.destination and agree.strip().rstrip("/").casefold() != config.origin.casefold():
+        emit(f"Turns {first}–{len(transcript.turns)} of this conversation would be sent to {config.origin}. "
+             f"Nothing was sent.\nRepeat the command with: --agree {config.origin}")
+        return 3
+
+    def show(bubble):
+        view = viewmodel.nudge_view(bubble)
+        emit("\n".join([f"▶ [{view.kind}] {view.title}"] + list(view.lines)
+                       + [strings.t("nudge_ask"), "  " + view.ask] + [f"  · {line}" for line in view.evidence]))
+
+    rows, bubbles = [], []
+    if stepwise:
+        played = replay.timeline(transcript, config, first=first)
+        session, rows, bubbles = played["session"], played["rows"], played["bubbles"]
+        for row in rows:
+            emit(f"turn {row['turn']:>3}: {row['action'] or '-':<6} {row['why'] or row['error'] or '-':<12} "
+                 f"{row['requests']} request(s)")
+            for bubble in (b for b in bubbles if b.through == row["turn"] and row["bubble"]):
+                show(bubble)
+        emit("")
+    else:
+        session = ss.Session(destination=config.destination, first=first)
+        auditor = au.Auditor(lambda: config)
+        # A turn still running: the user asks anyway, so what is settled is judged.
+        queue = list(session.observe(transcript)) or list(session.look_now())
+        while queue:
+            effect = queue.pop(0)
+            if isinstance(effect, ss.Run):
+                queue += session.audited(effect.job.id, auditor.run(effect.job))
+            elif isinstance(effect, ss.ShowBubble):
+                bubbles.append(effect.bubble)
+    emit("\n".join(viewmodel.ledger_lines(session.ledger, session.findings, session.usage, config.origin, session.last)))
+    if not stepwise:
+        emit("")
+        if bubbles:
+            show(bubbles[-1])
+        elif session.error:
+            emit(f"error: {session.error}")
+    last = session.last
+    write_report(report_path, {
+        "kind": "banxing-watch", "version": __version__, "source": kind, "turns": len(transcript.turns),
+        "through": session.ledger.through, "error": session.error,
+        "findings": [{"kind": f.kind, "weight": f.weight, "turns": sorted({r.turn for r in f.basis + f.now})}
+                     for f in session.findings],
+        "anchors": {status: sum(1 for a in session.ledger.anchors if a.status == status)
+                    for status in ("backed", "unchecked", "broken", "retired")},
+        "bubbles": [{"turn": b.through, "kind": b.finding.kind} for b in bubbles], "timeline": rows,
+        "looks": last.trace.looks if last else 0, "searches": last.trace.searches if last else 0,
+        "independent": bool(last and last.trace.independent),
+        "requests": session.usage.requests, "chars_sent": session.usage.chars, "turns_sent": list(session.usage.turns),
+        "provider": config.provider, "model": config.model_name,
+        # One conversation, read by a model, checked by nobody: not evidence of quality yet.
+        "evidence": "plumbing-only" if config.provider == "mock" else "real-model-output-unchecked"})
+    return 1 if session.error else 0
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog=APP_ID, description="Banxing — a companion beside Codex")
+    parser = argparse.ArgumentParser(prog=APP_ID, description="Banxing — an outside reader for a long conversation")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--require", default="", help="comma-separated checks the self-test must pass")
-    parser.add_argument("--probe", action="store_true")
-    parser.add_argument("--fill", action="store_true", help="with --probe: also test filling")
-    parser.add_argument("--wait", type=float, default=15.0)
     parser.add_argument("--report", default="", help="write the result as JSON to this file")
-    parser.add_argument("--demo", metavar="DRAFT", default="")
-    parser.add_argument("--mode", choices=levels.ORDER, default=levels.LEAD)
-    parser.add_argument("--eval", action="store_true", help="run the evaluation scenarios (structure checks)")
-    parser.add_argument("--limit", type=int, default=0, help="with --eval: only the first N scenarios")
+    parser.add_argument("--replay", action="store_true",
+                        help="play the labelled conversations to the watcher, turn by turn")
+    parser.add_argument("--limit", type=int, default=0, help="with --replay: only the first N conversations")
+    parser.add_argument("--watch", metavar="PATH", default="",
+                        help="audit one conversation: a ChatGPT export (.zip / folder / json), a Codex or "
+                             "Claude Code session .jsonl, or a transcript file")
+    parser.add_argument("--conversation", metavar="ID", default="", help="with --watch: which conversation of an export")
+    parser.add_argument("--list", action="store_true", help="with --watch: only list the conversations in PATH")
+    parser.add_argument("--from-turn", type=int, default=1, help="with --watch: the first turn that may be read")
+    parser.add_argument("--stepwise", action="store_true",
+                        help="with --watch: replay the conversation turn by turn and show where a bubble would appear")
     parser.add_argument("--agree", metavar="ORIGIN", default="",
-                        help="with --demo: agree to send drafts to this origin, e.g. https://api.anthropic.com")
+                        help="agree to send THIS run's conversation(s) to this origin, e.g. https://api.anthropic.com")
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
     if args.version:
@@ -505,15 +419,19 @@ def main(argv=None):
         return 0
     if args.selftest:
         return selftest(args.report, [name.strip() for name in args.require.split(",") if name.strip()])
-    if args.probe:
-        return probe(args.report, args.fill, args.wait)
-    if args.demo:
-        return demo(args.demo, args.mode, args.agree)
-    if args.eval:
-        return run_eval(args.report, args.limit)
+    if args.replay:
+        if args.agree:
+            settings = Settings()
+            config = settings.model_config()
+            if args.agree.strip().rstrip("/").casefold() == config.origin.casefold():
+                settings.give_consent(config.destination)
+        return run_replay(args.report, args.limit)
+    if args.watch:
+        return watch(args.watch, args.conversation, max(1, args.from_turn), args.agree, args.list, args.report,
+                     args.stepwise)
     if args.summary:
         summary = Store(home()).summary()
         emit(json.dumps(summary, ensure_ascii=False, indent=2))
         write_report(args.report, summary)
         return 0
-    return run_pet()
+    return run_app()

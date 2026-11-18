@@ -1,15 +1,9 @@
-"""Reading the Codex chat the user is looking at.
+"""Codex's own data, read-only: what a conversation with it looked like.
 
-  model      Turn / ThreadInfo / ChatSignals and conversion from both sources
-  appserver  preferred source: `codex app-server` (thread/list, thread/turns/list)
-  rollout    compatibility source: the session .jsonl files
-  identify   which stored thread is the chat on screen — or "not sure"
-  extract    the few excerpts of the last three finished turns worth sending
-  provider   ties them together; the only thing the rest of the app uses
+  model      conversion helpers for the app-server JSON
+  appserver  `codex app-server`: thread list, paged turn history
+  rollout    the session .jsonl files: locating them, reading their lines
 
-Everything here is read-only. When the chat cannot be identified with confidence
-the provider returns nothing and the pet works from the draft alone: a wrong
-chat's context is worse than none.
+Used by watch/sources.py to read the conversation the user chose. Nothing here
+starts, resumes or changes a thread.
 """
-from .model import ChatSignals, ContextExcerpt, ThreadInfo, Turn  # noqa: F401
-from .provider import ContextProvider  # noqa: F401

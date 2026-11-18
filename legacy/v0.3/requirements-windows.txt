@@ -1,0 +1,4 @@
+# Runtime dependencies of the Windows build. The core needs only the standard library.
+comtypes>=1.4.1        # UI Automation: reading the Codex input box and filling it
+pystray>=0.19.5        # tray icon (optional at runtime: without it the pet stays visible)
+Pillow>=10.0           # image for the tray icon

@@ -102,7 +102,7 @@ def keywords(text):
 
 
 # --------------------------------------------------------------------- redaction
-# The draft and chat excerpts are sent to a model service. Things that look like
+# Passages of a conversation are sent to a model service. Things that look like
 # credentials are masked first; this is a safety net, not a guarantee.
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),

@@ -1,20 +1,22 @@
 name: release
 # Builds the Windows package and publishes it on the Releases page.
-#   - push a tag:      git tag v0.3.0 && git push origin v0.3.0
+#   - push a tag:      git tag v0.4.0a1 && git push origin v0.4.0a1
 #   - or run manually: Actions -> release -> Run workflow, and type the version
 #
-# What a green run means (evidence level E2 in docs/verification.md): the tests passed
-# on a Windows runner, the packaged app starts, its windows can be built, UI Automation
-# loads, and the core flow works against the in-memory stand-in with the offline
-# stand-in model. It does NOT mean the app has been checked against a real Codex
-# window or a real model — those are manual steps (E3–E5), see docs/acceptance.md.
+# NOTE: rewritten for the supervising app (0.4) and NOT YET RUN (docs/verification.md, W-17).
+#
+# What a green run means (evidence level E2 in docs/verification.md): the tests passed on a
+# Windows runner, the packaged app starts, its windows can be built, and the whole flow works
+# with the offline stand-in. It does NOT mean the supervising model's judgement has been
+# evaluated, or that any real conversation was read — those are separate steps (E3–E5), see
+# docs/acceptance.md.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag to create, e.g. v0.3.0 (must match banxing/__init__.py)"
+        description: "Release tag to create, e.g. v0.4.0a1 (must match banxing/__init__.py)"
         required: true
 
 permissions:
@@ -44,31 +46,12 @@ jobs:
         run: python -m pip install --upgrade pip -r requirements-windows.txt pyinstaller
 
       - name: Tests
-        env:
-          BANXING_SHOTS: ${{ runner.temp }}/shots     # pictures of the pet's windows from the Tk tests
         run: python -m unittest discover -s tests -v
-
-      # Do not publish a build if the actual native-window paste check fails.
-      # The normal CI run keeps this desktop-sensitive check informational for diagnosis.
-      - name: UI Automation against a stand-in window (required for release)
-        shell: pwsh
-        env:
-          BANXING_LIVE: "1"
-        run: |
-          python -m unittest discover -s tests -p "test_windows.py" -v 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\standin.log"
-          exit $LASTEXITCODE
-
-      # comtypes writes its UI Automation wrappers on first use. Generating them now and
-      # bundling them means the packaged app does not depend on doing that at run time.
-      - name: Generate the UI Automation wrappers
-        run: python -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll'); import comtypes.gen.UIAutomationClient"
 
       - name: Build Banxing.exe
         run: >
           pyinstaller --noconfirm --clean --windowed --name Banxing
           --add-data "banxing/prompts;banxing/prompts"
-          --collect-submodules comtypes.gen
-          --hidden-import comtypes.stream
           --hidden-import pystray._win32
           run.py
 
@@ -77,7 +60,7 @@ jobs:
         run: |
           $report = "$env:RUNNER_TEMP\selftest-packaged.json"
           $app = Start-Process -FilePath "dist\Banxing\Banxing.exe" `
-            -ArgumentList "--selftest", "--require", "tk,win32,uia", "--report", "`"$report`"" -PassThru -Wait
+            -ArgumentList "--selftest", "--require", "tk,win32", "--report", "`"$report`"" -PassThru -Wait
           if (Test-Path $report) { Get-Content $report -Encoding utf8 } else { Write-Host "no report was written" }
           if ($app.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit code $($app.ExitCode))" }
           $result = Get-Content $report -Raw -Encoding utf8 | ConvertFrom-Json
@@ -105,8 +88,6 @@ jobs:
             release/*.zip
             release/*.sha256
             ${{ runner.temp }}/selftest-packaged.json
-            ${{ runner.temp }}/standin.log
-            ${{ runner.temp }}/shots/*.png
           if-no-files-found: ignore
 
       - name: Publish release
@@ -120,20 +101,20 @@ jobs:
             ## 伴行 · Windows 预览版
 
             下载 `Banxing-${{ env.VERSION }}-windows-x64.zip`，解压后双击 `Banxing.exe`（保留同目录的 `_internal` 文件夹）。
-            首次启动先在「模型配置」里选择模型服务并填入 API Key，再右键伴行做一次「校准」。
-            **校准通过之前，伴行不会自动读取或填写 Codex**，只能用「粘贴草稿」和「内置示例」。
+            右键伴行 →「旁听用的模型」配置在旁边读对话的模型，再 →「旁听一条对话」选一条长对话。
+            伴行只读：思路走偏时出一条气泡，附出处和一句可以带回去问主模型的话。
             程序未做代码签名，Windows 提示“已保护你的电脑”时点「更多信息 → 仍要运行」。
 
             **验证状态（证据等级见压缩包内 `VERIFICATION.md`）**：本构建通过了 Windows 运行器上的自动化测试和打包自检
-            （界面可构建、UI Automation 可加载、内存替身 + 离线替身模型下流程可走通）。
-            **尚未在真实 Codex 窗口上完成读草稿、回填、聊天识别和焦点行为的真机验收，真实模型的路线质量也未评估。**
-            真机验收步骤见 `ACCEPTANCE.md`；校准失败时请用菜单里的「导出证据包」生成不含内容的报告。
+            （界面可构建、离线替身下流程可走通）。
+            **旁听的模型判断得准不准，尚未用真实的模型和真实的对话评估；真实的导出文件和会话文件也未验证。**
+            验收步骤见 `ACCEPTANCE.md`。
 
             Download the zip, unzip, double-click `Banxing.exe` (keep the `_internal` folder next to it).
             The app is unsigned: on the SmartScreen prompt choose "More info" → "Run anyway".
-            Until its calibration has passed on your machine, the app neither reads nor writes Codex.
-            This build passed the automated tests and the packaged self-test on a Windows runner. It has **not**
-            been verified against a real Codex window or a real model; see `VERIFICATION.md` and `ACCEPTANCE.md`.
+            This build passed the automated tests and the packaged self-test on a Windows runner. The supervising
+            model's judgement has **not** been evaluated with a real model or on real conversations; see
+            `VERIFICATION.md` and `ACCEPTANCE.md`.
           files: |
             release/*.zip
             release/*.sha256

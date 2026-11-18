@@ -6,8 +6,8 @@
   Key binding    the saved API key belongs to the provider and endpoint it was
                  entered for; no environment variable or edited settings file may
                  point it somewhere else.
-  Consent        drafts go only to a destination the user has seen and agreed to —
-                 the effective one, after environment overrides.
+  Consent        a conversation goes only to a destination the user has seen and
+                 agreed to for it — see tests/test_watch_shell.py (WireTests).
   One request    no quiet second request with a changed body after an HTTP 400.
   Local only     the founder's brief is not published; tests cannot reach real
                  user data.
@@ -27,15 +27,25 @@ from pathlib import Path
 
 import safety
 
-from banxing import cli, config as config_module, examples, llm, mock, suggest
+from banxing import config as config_module, llm
 from banxing.config import Settings
 from banxing.context import rollout
+from banxing.watch import audit as au, session as ss
 
-from rig import RigCase
+from watchrig import research
 
 ROOT = Path(__file__).resolve().parent.parent
 KEY = "sk-test-not-a-real-key-0123456789"
-DRAFT = examples.get("software")["draft"]
+
+
+def audit_once(model_config, permit=None):
+    """One audit of a synthetic conversation through the app's own path to the model
+    service — the only path that sends a conversation anywhere."""
+    config = model_config()
+    session = ss.Session(destination=config.destination)
+    effects = session.observe(research())
+    job = next(effect.job for effect in effects if isinstance(effect, ss.Run))
+    return au.Auditor(model_config, permit=permit, timeout=5).run(job)
 BRIEF = ROOT / "docs" / "product-brief-original.md"
 QUOTE_LIMIT = 10        # a shared run this long (letters, digits, CJK) is a quote ...
 QUOTE_CJK = 7           # ... if at least this much of it is Chinese text
@@ -183,8 +193,8 @@ class RedirectTests(ServerCase):
 
     def test_the_refusal_reaches_the_user_as_an_error_state(self):
         front = self.redirecting(307, self.other.url + "/v1/messages")
-        outcome = suggest.Suggester(lambda: self.configs(front)[0]).analyze(DRAFT)
-        self.assertEqual((outcome.error, outcome.show), ("redirect", False))
+        outcome = audit_once(lambda: self.configs(front)[0])
+        self.assertEqual((outcome.error, outcome.findings), ("redirect", ()))
         self.assertEqual(self.other.requests, [])
 
     def test_control_the_stock_urllib_opener_does_leak(self):
@@ -223,7 +233,7 @@ class KeyBindingTests(ServerCase):
         folder = self.saved("openai", trusted.url + "/v1")
         settings = Settings(folder, environ={"BANXING_BASE_URL": other.url + "/v1"})
         settings.data["consent"] = settings.destination()       # even if consent were somehow there
-        outcome = suggest.Suggester(settings.model_config, permit=settings.consented).analyze(DRAFT)
+        outcome = audit_once(settings.model_config, settings.consented)
         self.assertEqual(outcome.error, "config")
         self.assertEqual(other.requests, [])
         self.assertEqual(trusted.requests, [])
@@ -282,156 +292,6 @@ class KeyBindingTests(ServerCase):
         self.assertTrue(Settings(folder, environ={"BANXING_PROVIDER": "openai"}).env_locked)
 
 
-# ============================================================== consent
-class ConsentTests(ServerCase, RigCase):
-    def configured(self, environ=None):
-        folder = self.temp()
-        settings = Settings(folder, environ={})
-        settings.save_model("openai", base_url="https://gateway.example.com/v1", api_key=KEY)
-        settings.give_consent()
-        return folder, Settings(folder, environ=environ or {})
-
-    def test_consent_names_scheme_host_and_port(self):
-        folder, settings = self.configured()
-        self.assertEqual(settings.get("consent"), "openai|https://gateway.example.com")
-        self.assertTrue(settings.consented())
-        settings.save_model("openai", base_url="https://gateway.example.com/v2", api_key=KEY)
-        self.assertTrue(settings.consented())                       # same origin, another path
-        for url in ("https://gateway.example.com:8443/v1", "https://other.example.net/v1",
-                    "http://localhost:8080/v1"):
-            settings.save_model("openai", base_url="https://gateway.example.com/v1", api_key=KEY)
-            settings.give_consent()
-            settings.save_model("openai", base_url=url, api_key=KEY)
-            self.assertFalse(settings.consented(), url)
-        settings.save_model("anthropic", base_url="https://gateway.example.com", api_key=KEY)
-        self.assertEqual(settings.destination(), "anthropic|https://gateway.example.com")
-        self.assertFalse(settings.consented())                      # another kind of service on that host
-
-    def test_consent_does_not_cover_an_environment_override(self):
-        other = self.server()
-        folder, _ = self.configured()
-        settings = Settings(folder, environ={"BANXING_BASE_URL": other.url + "/v1", "BANXING_API_KEY": "env-key"})
-        self.assertTrue(settings.model_config().ready)
-        self.assertEqual(settings.destination(), "openai|" + other.url)
-        self.assertFalse(settings.consented())
-        outcome = suggest.Suggester(settings.model_config, permit=settings.consented).analyze(DRAFT)
-        self.assertEqual(outcome.error, "consent")
-        self.assertEqual(other.requests, [])
-
-    def test_consent_is_recorded_only_for_what_was_shown(self):
-        folder, _ = self.configured()
-        env = {"BANXING_BASE_URL": "https://override.example.org/v1", "BANXING_API_KEY": "env-key"}
-        settings = Settings(folder, environ=env)
-        self.assertFalse(settings.give_consent(shown="openai|https://gateway.example.com"))
-        self.assertFalse(settings.consented())
-        self.assertEqual(Settings(folder, environ=env).get("consent"), "openai|https://gateway.example.com")
-        self.assertTrue(settings.give_consent(shown="openai|https://override.example.org"))
-        self.assertTrue(Settings(folder, environ=env).consented())
-        self.assertFalse(Settings(folder, environ={}).consented())  # and no longer for the saved one
-
-    def test_the_suggester_refuses_before_looking_at_the_chat_or_the_network(self):
-        class Context:
-            asked = 0
-
-            def excerpt(self, signals, draft):
-                Context.asked += 1
-
-        calls = []
-        suggester = suggest.Suggester(lambda: llm.ModelConfig("openai", base_url="https://gateway.example.com/v1",
-                                                              api_key=KEY),
-                                      context=Context(), complete=lambda *a, **k: calls.append(a),
-                                      permit=lambda config: False)
-        outcome = suggester.analyze(DRAFT, signals=object())
-        self.assertEqual((outcome.error, calls, Context.asked), ("consent", [], 0))
-
-    def test_the_permit_is_asked_about_the_configuration_that_is_used(self):
-        seen = []
-        config = llm.ModelConfig("mock")
-        suggest.Suggester(lambda: config, permit=lambda asked: seen.append(asked) or True).analyze(DRAFT)
-        self.assertEqual(seen, [config])
-
-    def test_following_cannot_send_without_consent_even_if_the_machine_thinks_it_may(self):
-        rig = self.rig(environ={})
-        rig.settings.save_model("openai", base_url="https://gateway.example.com/v1", api_key=KEY)
-        self.assertEqual(rig.controller.setup_reason(), "consent")
-        rig.machine.set_model_ready(True)                           # a bug elsewhere, simulated
-        rig.pause_on(DRAFT)
-        self.assertEqual(rig.calls, [])
-        self.assertEqual(rig.view.state, ("error", "consent"))
-        self.assertIsNone(rig.view.bubble)
-
-    def test_the_dialog_agrees_only_to_the_destination_it_displayed(self):
-        rig = self.rig(environ={"BANXING_API_KEY": "env-key"})      # not locked: the dialog edits freely
-        fields = dict(provider="openai", base_url="https://gateway.example.com/v1", api_key=KEY, model="", effort="low")
-        self.assertEqual(rig.controller.confirm_model("openai|https://evil.example.net", True, fields), "destination")
-        self.assertEqual(rig.controller.setup_reason(), "consent")
-        self.assertEqual(rig.controller.confirm_model("openai|https://gateway.example.com", False, fields), "")
-        self.assertEqual(rig.controller.setup_reason(), "")
-        self.assertFalse(rig.settings.get("use_context"))
-
-    def test_the_dialog_with_an_environment_destination(self):
-        env = {"BANXING_BASE_URL": "https://override.example.org/v1"}
-        rig = self.rig(environ=env)
-        rig.settings.data.update(provider="openai")
-        fields = dict(provider="openai", base_url="https://gateway.example.com/v1", api_key=KEY, model="", effort="none")
-        self.assertEqual(rig.controller.confirm_model("openai|https://override.example.org", True, fields), "env")
-        self.assertEqual(rig.settings.get("api_key"), "")           # locked: the dialog's fields were not saved
-        self.assertEqual(rig.settings.get("effort"), "none")        # only the effort is the dialog's to set
-        env["BANXING_API_KEY"] = "env-key"
-        self.assertEqual(rig.controller.confirm_model("openai|https://gateway.example.com", True, fields), "destination")
-        self.assertEqual(rig.controller.setup_reason(), "consent")
-        self.assertEqual(rig.controller.confirm_model("openai|https://override.example.org", True, fields), "")
-        self.assertEqual(rig.controller.setup_reason(), "")
-
-    def test_nothing_configured_and_the_offline_stand_in_need_no_consent(self):
-        settings = Settings(self.temp(), environ={})
-        self.assertEqual(settings.destination(), "")
-        self.assertFalse(settings.model_config().ready)
-        mock_settings = Settings(self.temp(), environ={"BANXING_PROVIDER": "mock"})
-        self.assertEqual((mock_settings.destination(), mock_settings.consented()), ("", True))
-
-
-class DemoConsentTests(ServerCase):
-    """`--demo` sends a draft too, so it obeys the same rule."""
-
-    def setUp(self):
-        reply = {"choices": [{"message": {"content": mock.complete({"draft": DRAFT, "mode": "every"})}}]}
-        self.model = self.server(lambda method, path: (200, {}, reply))
-        self.saved = {name: os.environ.get(name) for name in
-                      ("BANXING_HOME", "BANXING_PROVIDER", "BANXING_BASE_URL", "BANXING_API_KEY")}
-        self.addCleanup(self.restore)
-        os.environ.update(BANXING_HOME=str(self.temp()), BANXING_PROVIDER="openai",
-                          BANXING_BASE_URL=self.model.url + "/v1", BANXING_API_KEY=KEY)
-        self.lines = []
-        self.emit, cli.emit = cli.emit, self.lines.append
-        self.addCleanup(setattr, cli, "emit", self.emit)
-
-    def restore(self):
-        for name, value in self.saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-    def test_demo_sends_nothing_until_the_destination_is_agreed_to_by_name(self):
-        self.assertEqual(cli.main(["--demo", DRAFT]), 3)
-        self.assertIn(self.model.url, "\n".join(self.lines))            # it says where it would go
-        self.assertEqual(cli.main(["--demo", DRAFT, "--agree", "https://api.anthropic.com"]), 3)
-        self.assertEqual(cli.main(["--demo", DRAFT, "--agree", self.model.url.replace("127.0.0.1", "localhost")]), 3)
-        self.assertEqual(self.model.requests, [])
-
-        self.assertEqual(cli.main(["--demo", DRAFT, "--agree", self.model.url]), 0)
-        self.assertEqual(len(self.model.requests), 1)
-        self.assertIn("先用表格搭一版", "\n".join(self.lines))
-        self.assertEqual(cli.main(["--demo", DRAFT]), 0)                # remembered for this destination
-        self.assertEqual(len(self.model.requests), 2)
-
-        other = self.server()
-        os.environ["BANXING_BASE_URL"] = other.url + "/v1"              # a new destination: ask again
-        self.assertEqual(cli.main(["--demo", DRAFT]), 3)
-        self.assertEqual(other.requests, [])
-
-
 # ============================================================== one request
 class NoSilentRetryTests(ServerCase):
     def config(self, server, effort="low"):
@@ -454,7 +314,7 @@ class NoSilentRetryTests(ServerCase):
             llm.complete(self.config(server), "s", "u", timeout=5)
         self.assertEqual(caught.exception.kind, "effort")
         self.assertEqual(len(server.requests), 1)
-        outcome = suggest.Suggester(lambda: self.config(server)).analyze(DRAFT)
+        outcome = audit_once(lambda: self.config(server))
         self.assertEqual(outcome.error, "effort")
         self.assertEqual(len(server.requests), 2)                   # one per attempt the user made
 
@@ -522,7 +382,7 @@ class LocalOnlyTests(unittest.TestCase):
         self.assertFalse(Settings().model_config().ready)
 
     def test_every_test_module_enters_the_sandbox_first(self):
-        for path in sorted((ROOT / "tests").glob("test_*.py")) + [ROOT / "tests" / "rig.py"]:
+        for path in sorted((ROOT / "tests").glob("test_*.py")) + [ROOT / "tests" / "watchrig.py"]:
             text = path.read_text(encoding="utf-8")
             if "import" not in text:
                 continue                                            # a placeholder with no code

@@ -1,0 +1,139 @@
+name: release
+# Builds the Windows package and publishes it on the Releases page.
+#   - push a tag:      git tag v0.3.0 && git push origin v0.3.0
+#   - or run manually: Actions -> release -> Run workflow, and type the version
+#
+# What a green run means (evidence level E2 in docs/verification.md): the tests passed
+# on a Windows runner, the packaged app starts, its windows can be built, UI Automation
+# loads, and the core flow works against the in-memory stand-in with the offline
+# stand-in model. It does NOT mean the app has been checked against a real Codex
+# window or a real model — those are manual steps (E3–E5), see docs/acceptance.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to create, e.g. v0.3.0 (must match banxing/__init__.py)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The tag must match the version in the code
+        shell: pwsh
+        run: |
+          $version = python -c "import banxing; print(banxing.__version__)"
+          if ("v$version" -ne $env:VERSION) {
+            throw "tag $env:VERSION does not match banxing.__version__ ($version)"
+          }
+
+      - name: Dependencies
+        run: python -m pip install --upgrade pip -r requirements-windows.txt pyinstaller
+
+      - name: Tests
+        env:
+          BANXING_SHOTS: ${{ runner.temp }}/shots     # pictures of the pet's windows from the Tk tests
+        run: python -m unittest discover -s tests -v
+
+      # Do not publish a build if the actual native-window paste check fails.
+      # The normal CI run keeps this desktop-sensitive check informational for diagnosis.
+      - name: UI Automation against a stand-in window (required for release)
+        shell: pwsh
+        env:
+          BANXING_LIVE: "1"
+        run: |
+          python -m unittest discover -s tests -p "test_windows.py" -v 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\standin.log"
+          exit $LASTEXITCODE
+
+      # comtypes writes its UI Automation wrappers on first use. Generating them now and
+      # bundling them means the packaged app does not depend on doing that at run time.
+      - name: Generate the UI Automation wrappers
+        run: python -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll'); import comtypes.gen.UIAutomationClient"
+
+      - name: Build Banxing.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name Banxing
+          --add-data "banxing/prompts;banxing/prompts"
+          --collect-submodules comtypes.gen
+          --hidden-import comtypes.stream
+          --hidden-import pystray._win32
+          run.py
+
+      - name: Self-test of the packaged app
+        shell: pwsh
+        run: |
+          $report = "$env:RUNNER_TEMP\selftest-packaged.json"
+          $app = Start-Process -FilePath "dist\Banxing\Banxing.exe" `
+            -ArgumentList "--selftest", "--require", "tk,win32,uia", "--report", "`"$report`"" -PassThru -Wait
+          if (Test-Path $report) { Get-Content $report -Encoding utf8 } else { Write-Host "no report was written" }
+          if ($app.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit code $($app.ExitCode))" }
+          $result = Get-Content $report -Raw -Encoding utf8 | ConvertFrom-Json
+          if (-not $result.frozen) { throw "the self-test did not run from the packaged build" }
+          if ("v$($result.version)" -ne $env:VERSION) { throw "packaged version $($result.version) is not $env:VERSION" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "Banxing-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory -Path "release" | Out-Null
+          Copy-Item "dist\Banxing" "release\$name" -Recurse
+          Copy-Item "packaging\windows\README.txt" "release\$name\README.txt"
+          Copy-Item "docs\verification.md" "release\$name\VERIFICATION.md"
+          Copy-Item "docs\acceptance.md" "release\$name\ACCEPTANCE.md"
+          Compress-Archive -Path "release\$name" -DestinationPath "release\$name.zip"
+          (Get-FileHash "release\$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Set-Content "release\$name.zip.sha256"
+
+      - name: Keep the build and reports as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-${{ env.VERSION }}
+          path: |
+            release/*.zip
+            release/*.sha256
+            ${{ runner.temp }}/selftest-packaged.json
+            ${{ runner.temp }}/standin.log
+            ${{ runner.temp }}/shots/*.png
+          if-no-files-found: ignore
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Banxing ${{ env.VERSION }} Windows preview
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            ## 伴行 · Windows 预览版
+
+            下载 `Banxing-${{ env.VERSION }}-windows-x64.zip`，解压后双击 `Banxing.exe`（保留同目录的 `_internal` 文件夹）。
+            首次启动先在「模型配置」里选择模型服务并填入 API Key，再右键伴行做一次「校准」。
+            **校准通过之前，伴行不会自动读取或填写 Codex**，只能用「粘贴草稿」和「内置示例」。
+            程序未做代码签名，Windows 提示“已保护你的电脑”时点「更多信息 → 仍要运行」。
+
+            **验证状态（证据等级见压缩包内 `VERIFICATION.md`）**：本构建通过了 Windows 运行器上的自动化测试和打包自检
+            （界面可构建、UI Automation 可加载、内存替身 + 离线替身模型下流程可走通）。
+            **尚未在真实 Codex 窗口上完成读草稿、回填、聊天识别和焦点行为的真机验收，真实模型的路线质量也未评估。**
+            真机验收步骤见 `ACCEPTANCE.md`；校准失败时请用菜单里的「导出证据包」生成不含内容的报告。
+
+            Download the zip, unzip, double-click `Banxing.exe` (keep the `_internal` folder next to it).
+            The app is unsigned: on the SmartScreen prompt choose "More info" → "Run anyway".
+            Until its calibration has passed on your machine, the app neither reads nor writes Codex.
+            This build passed the automated tests and the packaged self-test on a Windows runner. It has **not**
+            been verified against a real Codex window or a real model; see `VERIFICATION.md` and `ACCEPTANCE.md`.
+          files: |
+            release/*.zip
+            release/*.sha256

@@ -7,7 +7,10 @@ is self-consistent, not that it matches a real Codex build.
 Usage: fake_appserver.py <data.json> [mode]
   mode: full (default) | old (no thread/turns/list) | strict (rejects sortKey /
         sortDirection) | silent (never answers after initialize) | asks (sends a
-        server request before answering)
+        server request before answering) | summary (turns come without their items;
+        thread/items/list has them) | plainview (does not know itemsView)
+
+Paging: `limit` and `cursor` are honoured and `nextCursor` is null on the last page.
 """
 import json
 import sys
@@ -62,8 +65,24 @@ def main():
             if turns is None:
                 send({"id": request_id, "error": {"code": -32600, "message": "thread not found"}})
                 continue
+            if mode == "plainview" and "itemsView" in params:
+                send({"id": request_id, "error": {"code": -32602, "message": "unknown field itemsView"}})
+                continue
             ordered = list(reversed(turns)) if params.get("sortDirection") == "desc" else list(turns)
-            send({"id": request_id, "result": {"data": ordered[: params.get("limit", 50)], "nextCursor": None}})
+            if mode == "summary":
+                ordered = [dict(turn, items=[]) for turn in ordered]
+            start, size = int(params.get("cursor") or 0), params.get("limit", 50)
+            following = str(start + size) if start + size < len(ordered) else None
+            send({"id": request_id, "result": {"data": ordered[start:start + size], "nextCursor": following}})
+        elif method == "thread/items/list":
+            if mode != "summary":
+                send({"id": request_id, "error": {"code": -32601, "message": "item paging is not supported"}})
+                continue
+            entries = [{"turnId": turn.get("id"), "item": item}
+                       for turn in data["turns"].get(params.get("threadId"), []) for item in turn.get("items", [])]
+            start, size = int(params.get("cursor") or 0), params.get("limit", 50)
+            following = str(start + size) if start + size < len(entries) else None
+            send({"id": request_id, "result": {"data": entries[start:start + size], "nextCursor": following}})
         elif method == "thread/read":
             turns = data["turns"].get(params.get("threadId"), [])
             thread = {"id": params.get("threadId"), "turns": turns if params.get("includeTurns") else []}
