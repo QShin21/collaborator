@@ -1,0 +1,202 @@
+name: release-once-v0.4.0a2
+# ONE-TIME release of exactly one version from exactly one source tree. NOT YET RUN at the time
+# of this commit. Delete this file once v0.4.0a2 is published (deleting it triggers nothing).
+#
+# Why it exists: the regular release workflow (release.yml) starts on a pushed tag or a manual
+# dispatch, and neither is available to the coordinator — only commits to a branch are. This
+# file is the same build, started by the commit that adds it.
+#
+# What it does: the steps of release.yml — version check, dependencies, tests, build
+# (packaging/windows/build.ps1: PyInstaller, packaged self-test, zip, installer), installer
+# check (verify-installer.ps1: silent install, run, reinstall, uninstall), pre-release — for
+#     version  v0.4.0a2
+#     tree     7c7436fde8e9bb5a3f12865bfbef53614b2c5b45
+# The build is made from the commit that carries that tree — the parent of the commit that
+# adds this file — not from the commit that carries this file, and the tag is created there.
+#
+# What it refuses (the "guard" step, before anything is built):
+#   - any repository or branch other than QShin21/collaborator, main;
+#   - a head commit that is not "the pinned tree plus this one file" (one parent, one changed
+#     file, the parent's tree exactly the one named above);
+#   - a parent commit without a successful ci.yml run of its own (push the source commit
+#     first, wait for CI — which builds and checks the installer — then push this file);
+#   - an existing tag or release v0.4.0a2 — nothing is ever overwritten, and v0.4.0a1 and
+#     every other release are never touched.
+# It cannot release any other version or any other source: both are constants below, and it
+# starts only on a push to main that changes THIS file. Later versions go through release.yml.
+# (A tag created here with the workflow's own token does not start release.yml: events made
+# with that token start no workflows.)
+#
+# What a green run means: evidence level E2 for the build (docs/verification.md) — the tests
+# passed on a Windows runner, the packaged app passed its self-test with the offline stand-in,
+# and the installer installed, ran and uninstalled on that runner. It does NOT mean the
+# supervising model's judgement has been evaluated, that any real conversation was read, or
+# that a person has used the app or its installer on a real desktop.
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/release-once-v0.4.0a2.yml"]
+
+permissions:
+  contents: write    # create the tag and the pre-release
+  actions: read      # look up the CI run of the pinned commit
+
+concurrency:
+  group: release-once-v0.4.0a2
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.repository == 'QShin21/collaborator' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    env:
+      VERSION: v0.4.0a2
+      BARE_VERSION: 0.4.0a2
+      TARGET_TREE: 7c7436fde8e9bb5a3f12865bfbef53614b2c5b45
+      THIS_FILE: .github/workflows/release-once-v0.4.0a2.yml
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard — only this version, only this source, nothing overwritten
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          function Fail($why) { Write-Host "::error::$why"; exit 1 }
+          if ($env:GITHUB_REPOSITORY -ne "QShin21/collaborator") { Fail "wrong repository: $env:GITHUB_REPOSITORY" }
+          if ($env:GITHUB_REF -ne "refs/heads/main") { Fail "wrong ref: $env:GITHUB_REF" }
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { Fail "the checkout is not the pushed commit" }
+
+          # The head commit is "the pinned tree plus this one file".
+          $parents = @((git rev-list --parents -n 1 HEAD) -split " ")
+          if ($parents.Count -ne 2) { Fail "the commit that adds this file must have exactly one parent" }
+          $target = $parents[1]
+          $changed = @(git diff --name-only $target HEAD)
+          if ($changed.Count -ne 1 -or $changed[0] -ne $env:THIS_FILE) {
+            Fail "this commit changes more than this workflow file: $($changed -join ', ')"
+          }
+          $tree = git rev-parse ($target + '^{tree}')
+          if ($tree -ne $env:TARGET_TREE) { Fail "the parent commit's tree is $tree, expected $env:TARGET_TREE" }
+
+          # Nothing is overwritten: neither a tag nor a release (drafts included) may exist.
+          $tags = git ls-remote --tags origin "refs/tags/$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { Fail "could not list the remote tags" }
+          if ($tags) { Fail "tag $env:VERSION already exists; this workflow never moves or reuses a tag" }
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { Fail "could not list the releases" }
+          if (@($releases | Where-Object { $_.tag_name -eq $env:VERSION }).Count -ne 0) {
+            Fail "a release for $env:VERSION already exists; this workflow never overwrites one"
+          }
+
+          # The pinned commit is one CI passed on (that run built and checked the installer).
+          $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$target&per_page=50" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { Fail "could not list the CI runs of $target" }
+          $green = @($runs.workflow_runs | Where-Object {
+            $_.head_sha -eq $target -and $_.path -eq ".github/workflows/ci.yml" -and $_.status -eq "completed" -and $_.conclusion -eq "success"
+          })
+          if ($green.Count -eq 0) { Fail "no successful ci run exists for $target; push the source commit first and wait for CI" }
+          $run = $green[0]
+
+          # From here on the working copy IS the pinned commit.
+          git checkout --quiet --detach $target
+          if ($LASTEXITCODE -ne 0) { Fail "could not check out $target" }
+          if ((git rev-parse HEAD) -ne $target) { Fail "HEAD is not the pinned commit" }
+          if (git status --porcelain) { Fail "the working copy is not clean" }
+          if (Test-Path $env:THIS_FILE) { Fail "this workflow file must not be part of the build" }
+          "TARGET_SHA=$target" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CI_RUN_ID=$($run.id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "building $env:VERSION from $target (tree $tree), CI run $($run.id): $($run.conclusion)"
+
+      # ---- from here on: the steps of release.yml ------------------------------------------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The version in the code is this one, and its notes are there
+        shell: pwsh
+        run: |
+          $version = (python -c "import banxing; print(banxing.__version__)" | Out-String).Trim()
+          if ($version -ne $env:BARE_VERSION) { throw "banxing.__version__ is $version, not $env:BARE_VERSION" }
+          if (-not (Test-Path "docs/release-notes/$env:VERSION.md")) { throw "docs/release-notes/$env:VERSION.md is missing" }
+
+      - name: Dependencies
+        run: python -m pip install --upgrade pip -r requirements-windows.txt pyinstaller
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the Windows package and the installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 -Version $env:BARE_VERSION
+
+      - name: Installer check (silent install, run, reinstall, uninstall)
+        shell: pwsh
+        run: |
+          $setup = "release\Banxing-$env:VERSION-windows-x64-setup.exe"
+          ./packaging/windows/verify-installer.ps1 -Setup $setup -Version $env:BARE_VERSION -Report "release\installer-check.json"
+
+      - name: Keep the build and reports as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-${{ env.VERSION }}
+          path: |
+            release/*.exe
+            release/*.zip
+            release/*.sha256
+            release/*.json
+          if-no-files-found: ignore
+
+      # Checked again right before publishing: the build took minutes, and nothing may have
+      # appeared under this name meanwhile.
+      - name: Still nothing to overwrite
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tags = git ls-remote --tags origin "refs/tags/$env:VERSION"
+          if ($LASTEXITCODE -ne 0 -or $tags) { Write-Host "::error::tag $env:VERSION exists or could not be checked"; exit 1 }
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($releases | Where-Object { $_.tag_name -eq $env:VERSION }).Count -ne 0) {
+            Write-Host "::error::a release for $env:VERSION exists or could not be checked; this workflow never overwrites one"; exit 1
+          }
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ env.TARGET_SHA }}    # the tag is created on the pinned commit
+          name: Banxing ${{ env.VERSION }} Windows preview
+          prerelease: true
+          fail_on_unmatched_files: true
+          body_path: docs/release-notes/${{ env.VERSION }}.md
+          files: |
+            release/*-setup.exe
+            release/*.zip
+            release/*.sha256
+
+      - name: The published release is the one that was meant, and the older ones are as they were
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:VERSION" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::the release cannot be read back"; exit 1 }
+          $tagged = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:VERSION" --jq ".sha"
+          $assets = @($release.assets | ForEach-Object { $_.name }) -join ", "
+          Write-Host "release: $($release.html_url)"
+          Write-Host "prerelease: $($release.prerelease), draft: $($release.draft), tag on: $tagged (CI run $env:CI_RUN_ID)"
+          Write-Host "assets: $assets"
+          Get-Content "release\Banxing-$env:VERSION-windows-x64-setup.exe.sha256"
+          Get-Content "release\Banxing-$env:VERSION-windows-x64.zip.sha256"
+          if (-not $release.prerelease -or $release.draft) { Write-Host "::error::not a published pre-release"; exit 1 }
+          if ($tagged -ne $env:TARGET_SHA) { Write-Host "::error::the tag is on $tagged, not on the pinned commit"; exit 1 }
+          if (@($release.assets).Count -ne 4) { Write-Host "::error::expected four assets, found: $assets"; exit 1 }
+          $older = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/v0.4.0a1" | ConvertFrom-Json
+          Write-Host "v0.4.0a1: $(@($older.assets).Count) assets, target $($older.target_commitish)"
+          if (@($older.assets).Count -ne 2 -or $older.target_commitish -ne "f7bb5b6b3bbef7d30d97ee7aa8115ae84328ad14") {
+            Write-Host "::error::the v0.4.0a1 release is not as it was"; exit 1
+          }
