@@ -24,9 +24,11 @@ whole life, including its end. Three rules follow, and PetApp keeps them itself:
     thread" — seen on the first Windows CI run of v0.3). `destroy()` therefore lets
     go of every Tk object and collects at once (`release_tk`).
 
-STATUS: this file was rewritten for the supervising app and HAS NOT BEEN RUN ON
-WINDOWS. It was built and looked at on Linux only. The overlay technique and the
-thread rules are the ones v0.3 passed the Windows runner with (legacy/v0.3).
+STATUS: built and looked at on Linux. On Windows this file has only been exercised
+by the automated tests and the self-test on a CI runner (0.4.0a1; what 0.4.0a2
+added — the guide, the coloured ledger, the status on hover — not even there yet).
+Nobody has used it on a real Windows desktop. The overlay technique and the thread
+rules are the ones v0.3 passed the Windows runner with (legacy/v0.3).
 """
 from __future__ import annotations
 
@@ -55,6 +57,18 @@ if WIN:
 BG, BORDER, TEXT, MUTED = "#ffffff", "#d0d7de", "#1f2328", "#656d76"
 ACCENT, HOVER, REASON, PANEL, ERROR = "#0969da", "#f3f4f6", "#9a6700", "#f6f8fa", "#d1242f"
 KEY = "#fe01fd"                     # transparent colour of the figure's window
+DONE, WARN, WARN_BG, ERROR_BG, DONE_BG = "#1a7f37", "#9a6700", "#fff8c5", "#ffebe9", "#dafbe1"
+# How the rows of the ledger look (viewmodel.ledger_rows names the kind of each row).
+ROWS = {
+    viewmodel.HEAD: dict(foreground=TEXT),
+    viewmodel.PLAIN: dict(foreground=TEXT),
+    viewmodel.DETAIL: dict(foreground=MUTED),
+    viewmodel.MUTED_ROW: dict(foreground=MUTED),
+    viewmodel.BACKED_ROW: dict(foreground=DONE, background=DONE_BG),
+    viewmodel.UNCHECKED_ROW: dict(foreground=WARN, background=WARN_BG),
+    viewmodel.BROKEN_ROW: dict(foreground=ERROR, background=ERROR_BG),
+    viewmodel.FINDING_ROW: dict(foreground="#bc4c00", background=WARN_BG),
+}
 BODY = {"watching": "#4f8cff", "thinking": "#4f8cff", "paused": "#9aa4b2", "idle": "#9aa4b2", "problem": "#4f8cff"}
 
 
@@ -87,6 +101,7 @@ class PetApp(View):
         self._owner = threading.get_ident()     # the only thread that may touch Tk — or end it
         self._destroyed = False
         self._release_pending = False
+        self._timers = {}                   # pending `after` calls that must not outlive what they act on
         self._menu = None
         self.root = tk.Tk()
         self.root.withdraw()
@@ -105,6 +120,10 @@ class PetApp(View):
         self.sources_open = False
         self._bubble_size = None
         self._ledger = {}                   # the open ledger window and how to refresh it
+        self._open = {}                     # dialogs of which there is at most one, by name
+        self._hover_timer = None
+        self._hovering = False              # the notice on screen is the status shown on hover
+        self._icon = None
         self.dialogs = 0
         self.dialog_windows = []
         self._drag = None
@@ -129,6 +148,9 @@ class PetApp(View):
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Button-3>", self._popup)
+        self.canvas.bind("<Enter>", self._hover_in)
+        self.canvas.bind("<Leave>", self._hover_out)
+        self._set_icon()
         self.bubble_window = self._overlay_window()
         self.toast = self._overlay_window()
         for window in (self.pet, self.bubble_window, self.toast):
@@ -145,6 +167,28 @@ class PetApp(View):
         self.watcher = watcher
         self.executor = executor
         self.changed()
+
+    def _set_icon(self):
+        """The figure's face as the icon of every dialog (instead of the toolkit's own)."""
+        try:
+            size, mid = 32, 15.5
+            image = tk.PhotoImage(master=self.root, width=size, height=size)
+            for y in range(size):
+                for x in range(size):
+                    if (x - mid) ** 2 + (y - mid) ** 2 > 15.2 ** 2:
+                        continue
+                    colour = BODY["watching"]
+                    for eye in (10.5, 20.5):
+                        distance = (x - eye) ** 2 + (y - 13.5) ** 2
+                        if distance <= 1.6 ** 2:
+                            colour = "#1f2328"
+                        elif distance <= 3.6 ** 2:
+                            colour = "#ffffff"
+                    image.put(colour, to=(x, y))
+            self.root.iconphoto(True, image)
+            self._icon = image
+        except tk.TclError:
+            log.exception("no window icon")
 
     def _overlay_window(self):
         window = tk.Toplevel(self.root)
@@ -211,9 +255,10 @@ class PetApp(View):
 
         def release():
             self._release_pending = False
+            self._timers.pop("release", None)
             if not self._quit:
                 release_tk()
-        self.root.after(250, release)
+        self._timers["release"] = self.root.after(250, release)
 
     def run(self):
         self._own("run()")
@@ -280,12 +325,14 @@ class PetApp(View):
         self._destroyed = True
         self._quit = True
         self._stop_tray()
-        try:
-            if self._toast_timer is not None:
-                self.root.after_cancel(self._toast_timer)
-        except tk.TclError:
-            pass
-        self._toast_timer = None
+        for timer in [self._toast_timer, self._hover_timer] + list(self._timers.values()):
+            try:
+                if timer is not None:
+                    self.root.after_cancel(timer)
+            except tk.TclError:
+                pass
+        self._toast_timer = self._hover_timer = None
+        self._timers.clear()
         try:
             self.root.destroy()
         except tk.TclError:
@@ -371,11 +418,40 @@ class PetApp(View):
             self.pet_visible = True
 
     def greet(self):
+        """On start: the guide, the first time; afterwards one line next to the figure."""
         self.place()
+        if not self.settings.get("guide_seen"):
+            self.settings.set(guide_seen=True)
+            self.open_guide()
+            return
         ready = self.watcher is not None and self.watcher.state().get("model")
         self._say(t("notice_started" if ready else "notice_setup"), seconds=8.0)
 
+    def _hover_in(self, event=None):
+        """Resting the pointer on the figure says what it is doing."""
+        self._hover_cancel()
+        self._hover_timer = self.root.after(500, self._hover_show)
+
+    def _hover_cancel(self):
+        if self._hover_timer is not None:
+            self.root.after_cancel(self._hover_timer)
+            self._hover_timer = None
+
+    def _hover_show(self):
+        self._hover_timer = None
+        if (self.watcher is None or self._drag is not None or self.bubble is not None
+                or self.toast.winfo_viewable()):
+            return                              # never in the way of something that is being said
+        self._say(viewmodel.hover_text(self.watcher.state()), seconds=8.0)
+        self._hovering = True
+
+    def _hover_out(self, event=None):
+        self._hover_cancel()
+        if self._hovering:
+            self._hide_toast()
+
     def _press(self, event):
+        self._hover_out()
         self._drag = {"x": event.x_root, "y": event.y_root, "rect": self.pet_rect, "moved": False}
 
     def _motion(self, event):
@@ -466,6 +542,7 @@ class PetApp(View):
         wrap = width - 2 * pad - self.px(8)
         outer = tk.Frame(window, bg=BORDER, padx=1, pady=1)
         outer.pack(fill="both", expand=True)
+        tk.Frame(outer, bg="#d4a72c" if view.tone == "direction" else BORDER, height=self.px(3)).pack(fill="x")
         inner = tk.Frame(outer, bg=BG, padx=pad, pady=self.px(8))
         inner.pack(fill="both", expand=True)
         head = tk.Frame(inner, bg=BG)
@@ -473,7 +550,10 @@ class PetApp(View):
         close = self._label(head, "✕", self.small, MUTED, cursor="hand2", padx=self.px(4))
         close.pack(side="right")
         close.bind("<Button-1>", lambda event: watcher.dismiss())
-        self._label(head, view.kind, self.small, REASON).pack(side="left")
+        bearing = view.tone == "direction"
+        self._label(head, view.kind, self.small, WARN if bearing else MUTED, WARN_BG if bearing else PANEL,
+                    padx=self.px(6), pady=self.px(1)).pack(side="left")
+        self._label(head, view.weight, self.small, MUTED).pack(side="left", padx=(self.px(6), 0))
         self._para(inner, view.title, wrap, self.bold).pack(fill="x", pady=(self.px(2), 0))
         for line in view.lines:
             self._para(inner, line, wrap).pack(fill="x", pady=(self.px(4), 0))
@@ -533,7 +613,9 @@ class PetApp(View):
 
     def _ask_note(self):
         self._hide_toast()
-        window = self._dialog(t("nudge_note_title"))
+        window = self._dialog(t("nudge_note_title"), key="note")
+        if window is None:
+            return
         self._para(window, t("nudge_note_hint"), self.px(380), self.small, MUTED).pack(fill="x")
         text = tk.Text(window, width=46, height=3, font=self.font, wrap="word", relief="solid", bd=1)
         text.pack(pady=self.px(8))
@@ -547,12 +629,14 @@ class PetApp(View):
         buttons.pack(fill="x")
         self._button(buttons, t("ok"), save, primary=True).pack(side="right")
         self._button(buttons, t("cancel"), window.destroy).pack(side="right", padx=self.px(8))
+        self._present(window)
 
     # ------------------------------------------------------------ notices
     def _say(self, text, action=None, seconds=5.0):
         """A short note next to the figure; `action` is (label, callback) for one button."""
         if not text or self.pet_rect is None or not self.pet_visible:
             return
+        self._hovering = False
         window = self.toast
         for child in window.winfo_children():
             child.destroy()
@@ -577,6 +661,7 @@ class PetApp(View):
         if self._toast_timer is not None:
             self.root.after_cancel(self._toast_timer)
             self._toast_timer = None
+        self._hovering = False
         self.toast.withdraw()
 
     # ------------------------------------------------------------ menu
@@ -641,6 +726,8 @@ class PetApp(View):
             if sure:
                 watcher.clear_data()
                 self._say(t("notice_cleared"))
+        elif item_id == "guide":
+            self.open_guide()
         elif item_id == "about":
             self.dialogs += 1
             try:
@@ -679,17 +766,29 @@ class PetApp(View):
                   else t("watch_error_source", why=viewmodel.source_error_text(problem)))
 
     # ------------------------------------------------------------ dialogs
-    def _dialog(self, title):
+    def _dialog(self, title, key="", resizable=False):
+        """A new dialog window, not yet on screen (`_present` shows it, centred).
+
+        With a `key` there is at most one such dialog: asking again brings the open
+        one to the front and returns None. Esc closes a dialog, like its ✕."""
+        if key:
+            old = self._open.get(key)
+            if old is not None and old.winfo_exists():
+                self._raise(old)
+                return None
         window = tk.Toplevel(self.root)
+        window.withdraw()
         window.title(title)
         window.configure(bg=BG, padx=self.px(16), pady=self.px(14))
-        window.resizable(False, False)
+        window.resizable(resizable, resizable)
         try:
             window.wm_attributes("-topmost", True)
         except tk.TclError:
             pass
         self.dialogs += 1
         self.dialog_windows.append(window)
+        if key:
+            self._open[key] = window
 
         def closed(event=None):
             if event is None or event.widget is window:
@@ -697,10 +796,48 @@ class PetApp(View):
                 self.dialogs = max(0, self.dialogs - 1)
                 if window in self.dialog_windows:
                     self.dialog_windows.remove(window)
+                if key and self._open.get(key) is window:
+                    del self._open[key]
+                self._cancel(str(window))
                 self._release_soon()
         window.bind("<Destroy>", closed)
-        window.after(50, lambda: window.winfo_exists() and window.focus_force())
+        window.bind("<Escape>", lambda event: window.destroy())
         return window
+
+    def _present(self, window):
+        """Put a finished dialog on screen: in the middle of the screen the figure is
+        on, entirely inside it, and in front."""
+        window.update_idletasks()
+        screen = self._screen()
+        size = Rect.at(0, 0, window.winfo_reqwidth(), window.winfo_reqheight())
+        rect = geometry.clamp_into(size.moved(screen.left + (screen.width - size.width) // 2,
+                                              screen.top + (screen.height - size.height) // 3), screen)
+        window.geometry(f"+{rect.left}+{rect.top}")
+        window.deiconify()
+        self._raise(window)
+
+    def _raise(self, window):
+        """In front, with the keyboard — once it is mapped. The delayed call is cancelled
+        when the window closes first: Tk names a callback after the address of its
+        function, so a call left behind can end up invoking a newer, unrelated one."""
+        name = str(window)
+
+        def focus():
+            self._timers.pop(name, None)
+            if window.winfo_exists():
+                window.focus_force()
+        window.deiconify()
+        window.lift()
+        self._cancel(name)
+        self._timers[name] = self.root.after(50, focus)
+
+    def _cancel(self, name):
+        timer = self._timers.pop(name, None)
+        if timer is not None:
+            try:
+                self.root.after_cancel(timer)
+            except tk.TclError:
+                pass
 
     def _watch(self, window, variable, callback):
         """Call `callback` when `variable` is written — until `window` closes.
@@ -724,7 +861,9 @@ class PetApp(View):
         """Which model reads alongside. Saving this sends nothing: a conversation is
         agreed to one at a time, in the dialog where it is chosen."""
         settings, watcher = self.settings, self.watcher
-        window = self._dialog(t("model_title"))
+        window = self._dialog(t("model_title"), key="model")
+        if window is None:
+            return
         wide = self.px(430)
         locked = settings.env_locked
         current = settings.model_config()
@@ -782,12 +921,15 @@ class PetApp(View):
         buttons.pack(fill="x", pady=(self.px(10), 0))
         self._button(buttons, t("model_save"), save, primary=True).pack(side="right")
         self._button(buttons, t("cancel"), window.destroy).pack(side="right", padx=self.px(8))
+        self._present(window)
 
     def open_watch(self):
         """Choose the conversation to watch and its range — and agree to exactly that.
         Nothing is read for sending before the button is pressed."""
         watcher, settings = self.watcher, self.settings
-        window = self._dialog(t("watch_title"))
+        window = self._dialog(t("watch_title"), key="watch")
+        if window is None:
+            return
         wide = self.px(520)
         self._para(window, t("watch_intro"), wide, self.small, MUTED).pack(fill="x")
         self._row(window, t("watch_file"))
@@ -841,6 +983,8 @@ class PetApp(View):
             offer(sources.PASTED, "", [sources.Listing(id="", title=t("watch_pasted"), turns=len(transcript.turns))],
                   text=text)
 
+        path.bind("<Return>", lambda event: load())
+        path.focus_set()
         self._button(line, t("watch_load"), load).pack(side="left", padx=(self.px(6), 0))
         self._button(line, t("watch_browse"), browse).pack(side="left", padx=(self.px(6), 0))
         more = tk.Frame(window, bg=BG)
@@ -915,33 +1059,56 @@ class PetApp(View):
         buttons.pack(fill="x", pady=(self.px(10), 0))
         self._button(buttons, t("watch_agree"), agree, primary=True).pack(side="right")
         self._button(buttons, t("cancel"), window.destroy).pack(side="right", padx=self.px(8))
+        self._present(window)
 
     def _text_dialog(self, title, text):
-        dialog = self._dialog(title)
-        box = tk.Text(dialog, width=84, height=24, font=self.small, wrap="word", relief="solid", bd=1)
-        box.pack()
+        dialog = self._dialog(title, key="text:" + title, resizable=True)
+        if dialog is None:
+            return
+        self._button(dialog, t("close"), dialog.destroy, primary=True).pack(side="bottom", anchor="e",
+                                                                            pady=(self.px(8), 0))
+        box = self._scrolled(dialog, width=84, height=24, font=self.small)
         box.insert("1.0", text)
         box.configure(state="disabled")
-        self._button(dialog, t("close"), dialog.destroy, primary=True).pack(anchor="e", pady=(self.px(8), 0))
+        self._present(dialog)
+
+    def _scrolled(self, parent, **options):
+        """A read-only text area with a scrollbar that grows with its window."""
+        frame = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+        frame.pack(fill="both", expand=True)
+        bar = tk.Scrollbar(frame, orient="vertical")
+        bar.pack(side="right", fill="y")
+        box = tk.Text(frame, wrap="char", relief="flat", bd=0, padx=self.px(10), pady=self.px(8), bg=BG, fg=TEXT,
+                      yscrollcommand=bar.set, spacing1=self.px(1), spacing3=self.px(1), **options)
+        box.pack(side="left", fill="both", expand=True)
+        bar.configure(command=box.yview)
+        return box
 
     def open_ledger(self):
         """The ledger: what the watcher holds, where each entry comes from, what was
         sent — and the user's own controls over all of it."""
-        old = self._ledger.get("window")
-        if old is not None and old.winfo_exists():
-            old.lift()
-            return
         watcher = self.watcher
-        window = self._dialog(t("ledger_title"))
+        window = self._dialog(t("ledger_title"), key="ledger", resizable=True)
+        if window is None:
+            return
         wide = self.px(600)
-        output = tk.Text(window, width=78, height=26, font=self.font, wrap="word", relief="solid", bd=1)
-        output.pack()
-        note = self._label(window, "", self.small, REASON, anchor="w", justify="left")
-        note.pack(fill="x", pady=(self.px(6), 0))
-        buttons = tk.Frame(window, bg=BG)
-        buttons.pack(fill="x", pady=(self.px(8), 0))
+        title = self._label(window, "", self.bold, anchor="w", justify="left")
+        title.pack(fill="x")
+        summary = tk.Frame(window, bg=BG)
+        summary.pack(fill="x", pady=(self.px(4), self.px(6)))
+        # The controls are packed before the text so that a small window keeps them.
         extra = tk.Frame(window, bg=BG)
-        extra.pack(fill="x", pady=(self.px(6), 0))
+        extra.pack(side="bottom", fill="x", pady=(self.px(6), 0))
+        buttons = tk.Frame(window, bg=BG)
+        buttons.pack(side="bottom", fill="x", pady=(self.px(8), 0))
+        note = self._label(window, "", self.small, REASON, anchor="w", justify="left")
+        note.pack(side="bottom", fill="x", pady=(self.px(6), 0))
+        output = self._scrolled(window, width=78, height=20, font=self.font)
+        indent = self.px(26)
+        for name, look in ROWS.items():
+            output.tag_configure(name, lmargin2=indent, **look)
+        output.tag_configure(viewmodel.HEAD, font=self.bold, lmargin2=0, spacing1=self.px(4))
+        output.tag_configure(viewmodel.FINDING_ROW, font=self.bold)
         keep = tk.IntVar(value=1 if watcher.persist else 0)
         shown = {"destination": None}
 
@@ -949,9 +1116,11 @@ class PetApp(View):
             session = watcher.session
             if session is None:
                 return
-            dialog = self._dialog(t("ledger_correct"))
+            dialog = self._dialog(t("ledger_correct"), key="goal")
+            if dialog is None:
+                return
             self._para(dialog, t("ledger_correct_hint"), self.px(420), self.small, MUTED).pack(fill="x")
-            text = tk.Text(dialog, width=52, height=4, font=self.font, wrap="word", relief="solid", bd=1)
+            text = tk.Text(dialog, width=52, height=4, font=self.font, wrap="char", relief="solid", bd=1)
             text.pack(pady=self.px(8))
             text.insert("1.0", session.ledger.goal.text)
             text.focus_set()
@@ -964,6 +1133,7 @@ class PetApp(View):
             row.pack(fill="x")
             self._button(row, t("ledger_correct_save"), save, primary=True).pack(side="right")
             self._button(row, t("cancel"), dialog.destroy).pack(side="right", padx=self.px(8))
+            self._present(dialog)
 
         def last(name):
             audit = watcher.session.last if watcher.session is not None else None
@@ -983,13 +1153,24 @@ class PetApp(View):
                 return
             session, state = watcher.session, watcher.state()
             config = self.settings.model_config()
-            lines = [t("status_none")] if session is None else (
-                ([watcher.title, ""] if watcher.title else [])
-                + viewmodel.ledger_lines(session.ledger, session.findings, session.usage, config.origin, session.last))
+            rows = [(t("status_none"), viewmodel.PLAIN)] if session is None else viewmodel.ledger_rows(
+                session.ledger, session.findings, session.usage, config.origin, session.last)
+            title.configure(text=self._wrapped(watcher.title if session is not None else "", self.bold, wide))
+            for child in summary.winfo_children():
+                child.destroy()
+            parts = viewmodel.ledger_summary(session.ledger, session.findings) if session is not None else ()
+            for label, count, kind in parts:
+                look = ROWS[kind]
+                self._label(summary, f"{label} {count}", self.small, look.get("foreground", TEXT),
+                            look.get("background", PANEL), padx=self.px(8), pady=self.px(2)).pack(
+                                side="left", padx=(0, self.px(6)))
+            top = output.yview()[0]             # a refresh keeps the place the user was reading
             output.configure(state="normal")
             output.delete("1.0", "end")
-            output.insert("1.0", "\n".join(lines))
+            for index, (text, kind) in enumerate(rows):
+                output.insert("end", text + ("\n" if index + 1 < len(rows) else ""), kind)
             output.configure(state="disabled")
+            output.yview_moveto(top)
             for frame in (buttons, extra):
                 for child in frame.winfo_children():
                     child.destroy()
@@ -1029,8 +1210,56 @@ class PetApp(View):
             if event is None or event.widget is window:
                 self._ledger = {}
         window.bind("<Destroy>", closed, add="+")
-        self._ledger = {"window": window, "refresh": refresh}
+        self._ledger = {"window": window, "refresh": refresh, "output": output}
         refresh()
+        self._present(window)
+        window.minsize(self.px(420), self.px(320))
+
+    def open_guide(self):
+        """How to use the app, in three steps — each showing where the user stands,
+        with a button that goes to it. Opened once by itself, then from the menu."""
+        window = self._dialog(t("guide_title"), key="guide")
+        if window is None:
+            return
+        wide = self.px(470)
+        state = self.watcher.state() if self.watcher is not None else {}
+        config = self.settings.model_config()
+        self._label(window, t("app_name"), self.bold, anchor="w").pack(fill="x")
+        self._para(window, t("guide_intro"), wide, self.font).pack(fill="x", pady=(self.px(4), self.px(4)))
+
+        def go(target):
+            window.destroy()
+            target()
+
+        steps = (
+            ("guide_step1", "guide_step1_text", bool(state.get("model")),
+             t("guide_step1_done", host=config.origin or t("ledger_usage_local")),
+             "guide_go_model", self.open_model),
+            ("guide_step2", "guide_step2_text", bool(state.get("active")), t("guide_step2_done"),
+             "guide_go_watch", self.open_watch),
+            ("guide_step3", "guide_step3_text", False, "", "", None),
+        )
+        nxt = next((index for index, step in enumerate(steps) if not step[2] and step[5] is not None), None)
+        for index, (head, body, done, done_text, action, target) in enumerate(steps):
+            box = tk.Frame(window, bg=PANEL, padx=self.px(10), pady=self.px(8))
+            box.pack(fill="x", pady=(self.px(6), 0))
+            line = tk.Frame(box, bg=PANEL)
+            line.pack(fill="x")
+            self._label(line, f"{index + 1}", self.bold, "#ffffff", DONE if done else ACCENT,
+                        padx=self.px(6)).pack(side="left")
+            self._label(line, t(head), self.bold, TEXT, PANEL).pack(side="left", padx=(self.px(8), 0))
+            if done:
+                self._label(line, "✓ " + done_text, self.small, DONE, PANEL).pack(side="right")
+            self._para(box, t(body), wide - self.px(20), self.small, MUTED, PANEL).pack(fill="x", pady=(self.px(4), 0))
+            if target is not None:
+                self._button(box, t(action), lambda target=target: go(target), primary=index == nxt).pack(
+                    anchor="w", pady=(self.px(6), 0))
+        self._para(window, t("guide_tips"), wide, self.small, TEXT).pack(fill="x", pady=(self.px(10), 0))
+        self._para(window, t("guide_privacy"), wide, self.small, MUTED).pack(fill="x", pady=(self.px(4), 0))
+        buttons = tk.Frame(window, bg=BG)
+        buttons.pack(fill="x", pady=(self.px(10), 0))
+        self._button(buttons, t("close"), window.destroy, primary=nxt is None).pack(side="right")
+        self._present(window)
 
     # ------------------------------------------------------------ tray
     def _start_tray(self):

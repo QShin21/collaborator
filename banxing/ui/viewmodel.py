@@ -43,6 +43,8 @@ class NudgeView:
     evidence: Tuple[str, ...]           # the passages, each with its turn and who said it
     footer: str
     caution: str = ""
+    tone: str = "direction"             # "direction" (it bears on where this is going) or "note"
+    weight: str = ""                    # the same, in words
     buttons: Tuple[str, ...] = ("sources", "copy", "intended", "wrong")
 
 
@@ -75,7 +77,8 @@ def nudge_view(bubble):
     if bubble.more > 0:
         footer += " · " + t("nudge_more", count=bubble.more)
     return NudgeView(kind=t("kind_" + finding.kind), title=finding.title, lines=tuple(lines), ask=finding.ask,
-                     evidence=evidence, footer=footer, caution=_caution(finding.caution))
+                     evidence=evidence, footer=footer, caution=_caution(finding.caution),
+                     tone=finding.weight, weight=t("weight_" + finding.weight))
 
 
 # ------------------------------------------------------------------ the ledger
@@ -120,47 +123,71 @@ def trace_line(trace):
 _ORDER = {"broken": 0, "unchecked": 1, "backed": 2, "retired": 3}
 
 
-def ledger_lines(ledger, findings=(), usage=None, origin="", last=None):
-    """The ledger as lines of text, for the ledger window and the command line. What
-    is shakiest comes first."""
+HEAD, PLAIN, MUTED_ROW, BACKED_ROW, UNCHECKED_ROW, BROKEN_ROW, FINDING_ROW, DETAIL = (
+    "head", "plain", "muted", "backed", "unchecked", "broken", "finding", "detail")
+_ROW_OF = {"backed": BACKED_ROW, "unchecked": UNCHECKED_ROW, "broken": BROKEN_ROW, "retired": MUTED_ROW}
+
+
+def ledger_rows(ledger, findings=(), usage=None, origin="", last=None):
+    """The ledger as (text, kind of row) pairs — what the ledger window colours by.
+    What is shakiest comes first."""
     goal = ledger.goal
     if not ledger.through and not goal.text:
-        return [t("ledger_empty"), "", usage_line(ledger, usage, origin)]
+        return [(t("ledger_empty"), PLAIN), ("", PLAIN), (usage_line(ledger, usage, origin), MUTED_ROW)]
     state = "goal_user" if goal.by == "user" else "goal_" + goal.state
-    lines = [f"{t('ledger_goal')}（{t(state)}）", "  " + (goal.text or t("goal_none")) + _sources(goal.refs)]
-    lines += ["  " + t("ledger_open", text=item) for item in goal.open]
-    lines += ["", t("ledger_anchors")]
+    rows = [(f"{t('ledger_goal')}（{t(state)}）", HEAD),
+            ("  " + (goal.text or t("goal_none")) + _sources(goal.refs), PLAIN)]
+    rows += [("  " + t("ledger_open", text=item), DETAIL) for item in goal.open]
+    rows += [("", PLAIN), (t("ledger_anchors"), HEAD)]
     marks = {"backed": "✓", "unchecked": "？", "broken": "✗", "retired": "–"}
     for anchor in sorted(ledger.anchors, key=lambda a: _ORDER.get(a.status, 9)):
-        lines.append(f"  {marks[anchor.status]} {t('status_' + anchor.status)} · {t('backing_' + anchor.backing)} · "
-                     f"{t('anchor_' + anchor.kind)}  {anchor.text}" + _sources(anchor.refs))
+        rows.append((f"  {marks[anchor.status]} {t('status_' + anchor.status)} · {t('backing_' + anchor.backing)} · "
+                     f"{t('anchor_' + anchor.kind)}  {anchor.text}" + _sources(anchor.refs), _ROW_OF[anchor.status]))
         if anchor.carries:
-            lines.append("      " + t("ledger_carries", text=anchor.carries))
-    lines += [] if ledger.anchors else ["  " + t("ledger_none")]
-    lines += ["", t("ledger_findings")]
+            rows.append(("      " + t("ledger_carries", text=anchor.carries), DETAIL))
+    rows += [] if ledger.anchors else [("  " + t("ledger_none"), MUTED_ROW)]
+    rows += [("", PLAIN), (t("ledger_findings"), HEAD)]
     for finding in findings:
-        lines.append(f"  ! [{t('kind_' + finding.kind)} · {t('weight_' + finding.weight)}] {finding.title}"
-                     + _sources(finding.basis + finding.now))
-        lines.append("      " + finding.claim)
-        lines.append("      " + t("nudge_why", text=finding.why))
-        lines.append("      " + t("nudge_ask") + finding.ask)
-    lines += [] if findings else ["  " + t("ledger_none")]
+        rows.append((f"  ! [{t('kind_' + finding.kind)} · {t('weight_' + finding.weight)}] {finding.title}"
+                     + _sources(finding.basis + finding.now), FINDING_ROW))
+        rows.append(("      " + finding.claim, PLAIN))
+        rows.append(("      " + t("nudge_why", text=finding.why), PLAIN))
+        rows.append(("      " + t("nudge_ask") + finding.ask, DETAIL))
+    rows += [] if findings else [("  " + t("ledger_none"), MUTED_ROW)]
     if ledger.marks:
-        lines += ["", t("ledger_marks")]
+        rows += [("", PLAIN), (t("ledger_marks"), HEAD)]
         for mark in ledger.marks:
             kind = t("kind_" + mark.kind)
-            lines.append("  " + t("mark_line", turn=mark.turn, kind=kind, title=mark.title,
-                                  state=t("mark_" + mark.state)) + _sources(mark.refs))
+            rows.append(("  " + t("mark_line", turn=mark.turn, kind=kind, title=mark.title,
+                                  state=t("mark_" + mark.state)) + _sources(mark.refs),
+                         BACKED_ROW if mark.state == "resolved" else PLAIN))
             if mark.note:
-                lines.append("      " + mark.note)
+                rows.append(("      " + mark.note, DETAIL))
     if ledger.gaps:
-        lines += ["", t("ledger_gaps")]
-        lines += ["  - " + t("gap_" + gap.kind, turn=gap.turn, count=gap.count) for gap in ledger.gaps]
+        rows += [("", PLAIN), (t("ledger_gaps"), HEAD)]
+        rows += [("  - " + t("gap_" + gap.kind, turn=gap.turn, count=gap.count), DETAIL) for gap in ledger.gaps]
     if last is not None and last.ok:
-        lines += ["", t("ledger_last"), "  " + trace_line(last.trace)]
+        rows += [("", PLAIN), (t("ledger_last"), HEAD), ("  " + trace_line(last.trace), DETAIL)]
         if not findings:
-            lines.append("  " + t("ledger_sound") + (f"：{last.sound}" if last.sound else ""))
-    return lines + ["", usage_line(ledger, usage, origin)]
+            rows.append(("  " + t("ledger_sound") + (f"：{last.sound}" if last.sound else ""), BACKED_ROW))
+    return rows + [("", PLAIN), (usage_line(ledger, usage, origin), MUTED_ROW)]
+
+
+def ledger_lines(ledger, findings=(), usage=None, origin="", last=None):
+    """The ledger as lines of text, for the command line."""
+    return [text for text, _ in ledger_rows(ledger, findings, usage, origin, last)]
+
+
+def ledger_summary(ledger, findings=()):
+    """The line above the ledger: how the footing stands, at a glance.
+    Returns ((label, count, kind of row), ...) — only what is there."""
+    statuses = [anchor.status for anchor in ledger.anchors]
+    parts = [(t("status_" + status), statuses.count(status), _ROW_OF[status])
+             for status in ("broken", "unchecked", "backed") if statuses.count(status)]
+    bearing = sum(1 for finding in findings if finding.weight == "direction")
+    if bearing:
+        parts.insert(0, (t("weight_direction"), bearing, FINDING_ROW))
+    return tuple(parts)
 
 
 # ------------------------------------------------------------------ status, notices, menu
@@ -182,6 +209,17 @@ def status_text(state):
         return t("status_auditing")
     line = t("status_on", through=state.get("through", 0))
     return line + (" · " + t("status_findings", count=state["findings"]) if state.get("findings") else "")
+
+
+def hover_text(state):
+    """What the figure says when the pointer rests on it: the status and what a click does."""
+    if not state.get("model"):
+        hint = "hover_model"
+    elif not state.get("active"):
+        hint = "hover_watch"
+    else:
+        hint = "hover_look"
+    return status_text(state) + "\n" + t(hint)
 
 
 def source_error_text(kind):
@@ -230,7 +268,8 @@ def menu_items(state, has_tray=False) -> List[Item]:
                        t("menu_resume" if state.get("paused") else "menu_pause")),
                   Item("stop", t("menu_stop"))]
     items += [Item("watch", t("menu_watch")), SEPARATOR, Item("model", t("menu_model")),
-              Item("folder", t("menu_folder")), Item("clear", t("menu_clear")), Item("about", t("menu_about")),
+              Item("folder", t("menu_folder")), Item("clear", t("menu_clear")), Item("guide", t("menu_guide")),
+              Item("about", t("menu_about")),
               SEPARATOR]
     if has_tray:
         items.append(Item("hide", t("menu_hide")))
@@ -242,5 +281,5 @@ def tray_items(state, visible) -> List[Item]:
     items = [Item("show" if not visible else "hide", t("menu_show" if not visible else "menu_hide"))]
     if state.get("active"):
         items += [Item("look", t("menu_look")), Item("ledger", t("menu_ledger"))]
-    return items + [Item("watch", t("menu_watch")), Item("model", t("menu_model")), SEPARATOR,
-                    Item("quit", t("menu_quit"))]
+    return items + [Item("watch", t("menu_watch")), Item("model", t("menu_model")), Item("guide", t("menu_guide")),
+                    SEPARATOR, Item("quit", t("menu_quit"))]

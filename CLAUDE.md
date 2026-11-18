@@ -39,10 +39,17 @@ belonged to it — its plans, evidence records and tests — are archived in `le
   `--conversation ID`, `--from-turn N`, `--stepwise`)
 - Replay of the labelled conversations: `BANXING_PROVIDER=mock python3 run.py --replay`
 - Run: `python run.py`
-- Release: bump `banxing/__init__.py`, update
-  `docs/verification.md`, push a `v*` tag; `.github/workflows/release.yml` tests, builds with
-  PyInstaller, self-tests the build, publishes. The coordinator pushes and releases — do not
-  push or tag. The workflows were rewritten for this version and have never run.
+- Release: bump `banxing/__init__.py`, update `docs/verification.md`, write
+  `docs/release-notes/v<version>.md`, push a `v*` tag; `.github/workflows/release.yml` tests,
+  builds with `packaging/windows/build.ps1` (PyInstaller, packaged self-test, zip, Inno Setup
+  installer), checks the installer with `verify-installer.ps1` (silent install, run, reinstall,
+  uninstall), publishes a pre-release and never overwrites one. CI runs the same build and check
+  on every push. The coordinator pushes and releases — do not push or tag. `release.yml` itself
+  has never run (0.4.0a1 went out through a one-time workflow); the PowerShell and Inno Setup
+  files cannot be run in this Linux workspace — say so, never "tested".
+- The installer never touches `%APPDATA%\Banxing` (settings, protected key, a kept ledger), on
+  upgrade or uninstall. Its `AppId` never changes; `AppMutex` must stay the name `cli.run_app`
+  takes. `banxing.iss` is UTF-8 with a byte-order mark — keep it (a test checks).
 
 ## Rules of the codebase
 

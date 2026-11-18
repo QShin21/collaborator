@@ -44,6 +44,7 @@ DEFAULTS = dict(
     #                              conversation is agreed to one at a time, in its own dialog
     language="auto",             # auto | zh | en
     pet_free=None,               # [x, y] of the figure on screen
+    guide_seen=False,            # the guide opened by itself once (0.4.0a2; absent in older files = not yet)
     codex_command="",            # override for `codex app-server`
     sessions_dir="",             # override for ~/.codex/sessions
     model_timeout_seconds=60.0,

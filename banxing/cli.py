@@ -226,12 +226,40 @@ def _tk_walkthrough(folder):
         app.root.update()
         size = (app.bubble_window.winfo_width(), app.bubble_window.winfo_height())
         app._build_menu(__import__("banxing.ui.viewmodel", fromlist=["x"]).menu_items(watcher.state()))
-        for opener in (app.open_model, app.open_watch, app.open_ledger):
+        openers = (app.open_model, app.open_watch, app.open_ledger, app.open_guide)
+        for opener in openers:
             opener()
             app.root.update()
+            opener()                                # asked again: the same window, not a second one
+            app.root.update()
+        dialogs = len(app.dialog_windows)
+        if dialogs != len(openers) or not all(window.winfo_viewable() for window in app.dialog_windows):
+            raise RuntimeError(f"{dialogs} dialogs on screen, expected {len(openers)}")
+        coloured = bool(app._ledger["output"].tag_ranges("unchecked"))
+        if not coloured:
+            raise RuntimeError("the ledger window does not mark the unchecked entry")
+        last = app.dialog_windows[-1]                           # Esc closes a dialog
+        last.focus_force()
+        app.root.update()
+        last.event_generate("<Escape>")
+        app.root.update()
+        escape = "closed" if len(app.dialog_windows) == dialogs - 1 else "not tried"
+        if escape != "closed" and app.root.focus_get() is not None:
+            raise RuntimeError("Esc did not close the dialog")
+        # ("not tried": Tk delivers a key to nobody while the application does not have the keyboard.)
         for window in list(app.dialog_windows):
             window.destroy()
-        window = opener = None
+        app.root.update()
+        if app.dialogs or app.dialog_windows:
+            raise RuntimeError("a closed dialog is still counted as open")
+        for opener in openers:                      # and every one opens again after being closed
+            opener()
+            app.root.update()
+        if len(app.dialog_windows) != len(openers):
+            raise RuntimeError("a dialog did not open again after it was closed")
+        for window in list(app.dialog_windows):
+            window.destroy()
+        window = opener = openers = last = None
         app.root.update()
         app._copy_ask()
         app.root.update()
@@ -241,7 +269,8 @@ def _tk_walkthrough(folder):
         if min(size) < 40:
             raise RuntimeError(f"the bubble is not on screen (size {size})")
         watcher.stop()
-        return {"bubble": list(size), "scale": round(app.scale, 2)}
+        return {"bubble": list(size), "scale": round(app.scale, 2), "dialogs": dialogs, "ledger_coloured": coloured,
+                "escape": escape}
     finally:
         app.destroy()
 

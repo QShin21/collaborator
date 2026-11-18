@@ -1,6 +1,7 @@
 name: ci
-# NOTE: rewritten for the supervising app (0.4) and NOT YET RUN. Its first run is itself a
-# test; see docs/verification.md, W-17.
+# The tests, self-test and replay steps ran green for 0.4.0a1. The Windows build and
+# installer steps at the end were added for 0.4.0a2 and are NOT YET RUN at the time of this
+# commit — their first run is itself a test; see docs/verification.md, W-17 and W-18.
 on:
   push:
   pull_request:
@@ -31,9 +32,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Optional Windows dependencies (tray icon)
+      - name: Optional Windows dependencies (tray icon) and the build tool
         if: runner.os == 'Windows'
-        run: python -m pip install --upgrade pip -r requirements-windows.txt
+        run: python -m pip install --upgrade pip -r requirements-windows.txt pyinstaller
 
       # Linux: a virtual display lets the Tk shell tests run for real (they skip without one).
       - name: Unit tests (offline, synthetic data only)
@@ -67,6 +68,24 @@ jobs:
           BANXING_PROVIDER: mock
         run: python run.py --replay --report "${{ runner.temp }}/replay.json"
 
+      # The same build a release makes: the packaged app (with its own self-test), the
+      # portable zip and the installer. Nothing is published from here.
+      - name: Build the Windows package and the installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (python -c "import banxing; print(banxing.__version__)" | Out-String).Trim()
+          ./packaging/windows/build.ps1 -Version $version
+
+      # Install it for real on this throw-away machine, run it, install again, uninstall.
+      - name: Installer check (silent install, run, reinstall, uninstall)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (python -c "import banxing; print(banxing.__version__)" | Out-String).Trim()
+          $setup = "release\Banxing-v$version-windows-x64-setup.exe"
+          ./packaging/windows/verify-installer.ps1 -Setup $setup -Version $version -Report "release\installer-check.json"
+
       - name: Keep the reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -75,4 +94,18 @@ jobs:
           path: |
             ${{ runner.temp }}/selftest.json
             ${{ runner.temp }}/replay.json
+            release/selftest-packaged.json
+            release/installer-check.json
           if-no-files-found: ignore
+
+      - name: Keep the Windows build (not a release — for looking at)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-unreleased
+          path: |
+            release/*.exe
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: ignore
+          retention-days: 14

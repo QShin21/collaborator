@@ -1,22 +1,28 @@
 name: release
-# Builds the Windows package and publishes it on the Releases page.
-#   - push a tag:      git tag v0.4.0a1 && git push origin v0.4.0a1
+# Builds the Windows installer and the portable zip and publishes them on the Releases page.
+#   - push a tag:      git tag v0.4.0a2 && git push origin v0.4.0a2
 #   - or run manually: Actions -> release -> Run workflow, and type the version
 #
-# NOTE: rewritten for the supervising app (0.4) and NOT YET RUN (docs/verification.md, W-17).
+# NOTE: this workflow itself is NOT YET RUN (docs/verification.md, W-17): 0.4.0a1 was published
+# by a one-time workflow with the same steps, because only commits to a branch were available
+# to whoever published it. The build and the installer check are scripts shared with ci.yml
+# (packaging/windows/build.ps1, verify-installer.ps1), so they run on every push.
+#
+# It never replaces anything: an existing release for the tag stops the run.
 #
 # What a green run means (evidence level E2 in docs/verification.md): the tests passed on a
-# Windows runner, the packaged app starts, its windows can be built, and the whole flow works
-# with the offline stand-in. It does NOT mean the supervising model's judgement has been
-# evaluated, or that any real conversation was read — those are separate steps (E3–E5), see
-# docs/acceptance.md.
+# Windows runner, the packaged app starts, its windows can be built, the whole flow works with
+# the offline stand-in, and the installer installs, runs and uninstalls on that runner. It does
+# NOT mean the supervising model's judgement has been evaluated, that any real conversation
+# was read, or that a person has used the app or the installer on a real desktop (E3–E5, see
+# docs/acceptance.md).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag to create, e.g. v0.4.0a1 (must match banxing/__init__.py)"
+        description: "Release tag to create, e.g. v0.4.0a2 (must match banxing/__init__.py)"
         required: true
 
 permissions:
@@ -34,13 +40,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: The tag must match the version in the code
+      - name: The tag must match the version in the code, have its notes, and not be released yet
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $version = python -c "import banxing; print(banxing.__version__)"
+          $version = (python -c "import banxing; print(banxing.__version__)" | Out-String).Trim()
           if ("v$version" -ne $env:VERSION) {
             throw "tag $env:VERSION does not match banxing.__version__ ($version)"
           }
+          if (-not (Test-Path "docs/release-notes/$env:VERSION.md")) {
+            throw "docs/release-notes/$env:VERSION.md is missing"
+          }
+          $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "could not list the releases" }
+          if (@($releases | Where-Object { $_.tag_name -eq $env:VERSION }).Count -ne 0) {
+            throw "a release for $env:VERSION already exists; this workflow never overwrites one"
+          }
+          "BARE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Dependencies
         run: python -m pip install --upgrade pip -r requirements-windows.txt pyinstaller
@@ -48,36 +65,15 @@ jobs:
       - name: Tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build Banxing.exe
-        run: >
-          pyinstaller --noconfirm --clean --windowed --name Banxing
-          --add-data "banxing/prompts;banxing/prompts"
-          --hidden-import pystray._win32
-          run.py
+      - name: Build the Windows package and the installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 -Version $env:BARE_VERSION
 
-      - name: Self-test of the packaged app
+      - name: Installer check (silent install, run, reinstall, uninstall)
         shell: pwsh
         run: |
-          $report = "$env:RUNNER_TEMP\selftest-packaged.json"
-          $app = Start-Process -FilePath "dist\Banxing\Banxing.exe" `
-            -ArgumentList "--selftest", "--require", "tk,win32", "--report", "`"$report`"" -PassThru -Wait
-          if (Test-Path $report) { Get-Content $report -Encoding utf8 } else { Write-Host "no report was written" }
-          if ($app.ExitCode -ne 0) { throw "the packaged app failed its self-test (exit code $($app.ExitCode))" }
-          $result = Get-Content $report -Raw -Encoding utf8 | ConvertFrom-Json
-          if (-not $result.frozen) { throw "the self-test did not run from the packaged build" }
-          if ("v$($result.version)" -ne $env:VERSION) { throw "packaged version $($result.version) is not $env:VERSION" }
-
-      - name: Package
-        shell: pwsh
-        run: |
-          $name = "Banxing-$env:VERSION-windows-x64"
-          New-Item -ItemType Directory -Path "release" | Out-Null
-          Copy-Item "dist\Banxing" "release\$name" -Recurse
-          Copy-Item "packaging\windows\README.txt" "release\$name\README.txt"
-          Copy-Item "docs\verification.md" "release\$name\VERIFICATION.md"
-          Copy-Item "docs\acceptance.md" "release\$name\ACCEPTANCE.md"
-          Compress-Archive -Path "release\$name" -DestinationPath "release\$name.zip"
-          (Get-FileHash "release\$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Set-Content "release\$name.zip.sha256"
+          $setup = "release\Banxing-$env:VERSION-windows-x64-setup.exe"
+          ./packaging/windows/verify-installer.ps1 -Setup $setup -Version $env:BARE_VERSION -Report "release\installer-check.json"
 
       - name: Keep the build and reports as workflow artifacts
         if: always()
@@ -85,9 +81,10 @@ jobs:
         with:
           name: windows-build-${{ env.VERSION }}
           path: |
+            release/*.exe
             release/*.zip
             release/*.sha256
-            ${{ runner.temp }}/selftest-packaged.json
+            release/*.json
           if-no-files-found: ignore
 
       - name: Publish release
@@ -96,25 +93,9 @@ jobs:
           tag_name: ${{ env.VERSION }}
           name: Banxing ${{ env.VERSION }} Windows preview
           prerelease: true
-          generate_release_notes: true
-          body: |
-            ## 伴行 · Windows 预览版
-
-            下载 `Banxing-${{ env.VERSION }}-windows-x64.zip`，解压后双击 `Banxing.exe`（保留同目录的 `_internal` 文件夹）。
-            右键伴行 →「旁听用的模型」配置在旁边读对话的模型，再 →「旁听一条对话」选一条长对话。
-            伴行只读：思路走偏时出一条气泡，附出处和一句可以带回去问主模型的话。
-            程序未做代码签名，Windows 提示“已保护你的电脑”时点「更多信息 → 仍要运行」。
-
-            **验证状态（证据等级见压缩包内 `VERIFICATION.md`）**：本构建通过了 Windows 运行器上的自动化测试和打包自检
-            （界面可构建、离线替身下流程可走通）。
-            **旁听的模型判断得准不准，尚未用真实的模型和真实的对话评估；真实的导出文件和会话文件也未验证。**
-            验收步骤见 `ACCEPTANCE.md`。
-
-            Download the zip, unzip, double-click `Banxing.exe` (keep the `_internal` folder next to it).
-            The app is unsigned: on the SmartScreen prompt choose "More info" → "Run anyway".
-            This build passed the automated tests and the packaged self-test on a Windows runner. The supervising
-            model's judgement has **not** been evaluated with a real model or on real conversations; see
-            `VERIFICATION.md` and `ACCEPTANCE.md`.
+          fail_on_unmatched_files: true
+          body_path: docs/release-notes/${{ env.VERSION }}.md
           files: |
+            release/*-setup.exe
             release/*.zip
             release/*.sha256

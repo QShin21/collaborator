@@ -5,11 +5,21 @@
 回头去查那些只是说过、没有查过的地方；思路走偏时提醒你一句，并给一句可以带回去问的话。
 它只读，不往任何应用里写。目标和每一步都由你定。
 
+【安装与卸载】
+- 安装版（Banxing-…-setup.exe）：双击安装，不需要管理员权限。装到 %LOCALAPPDATA%\Programs\Banxing，
+  开始菜单里有“伴行 Banxing”，可勾选桌面快捷方式。再装一次即覆盖升级。
+  卸载：设置 → 应用 → 伴行 Banxing → 卸载。
+- 便携版（Banxing-….zip）：解压后双击 Banxing.exe（请保留同一文件夹里的 _internal 文件夹）。
+- 升级和卸载都不动你的数据（见下面【数据在哪】）。想彻底清掉：卸载前在右键菜单点“清除本机数据”，
+  或卸载后手动删除那个文件夹。
+- 程序和安装程序都没有代码签名：Windows 提示“已保护你的电脑”时，点“更多信息” → “仍要运行”。
+
 【怎么用】
-1. 双击 Banxing.exe（请保留同一文件夹里的 _internal 文件夹）。
-   Windows 提示“已保护你的电脑”时：点“更多信息” → “仍要运行”（程序没有代码签名）。
+1. 打开伴行（开始菜单，或双击 Banxing.exe）。屏幕右下方出现一个蓝色的小圆脸；第一次会弹出使用说明，
+   以后在右键菜单“使用说明”里。鼠标停在伴行上会显示它现在的状态。
 2. 右键伴行 → “旁听用的模型”：选择模型服务，填入 API Key。
    这是在旁边读对话的那个模型，最好不是你正在对话的那一个。
+   没有 Key 想先看流程：选“离线演示”（关键词规则，不联网，不代表真实的判断质量）。
 3. 右键伴行 → “旁听一条对话”，选一条：
    - 在聊天网页里全选、复制，然后点“从剪贴板读取”；
    - 或一份 ChatGPT 导出（zip / 文件夹 / json）、Codex 或 Claude Code 的会话（jsonl）、文字稿。
@@ -18,8 +28,9 @@
    哪里不对、它影响什么、依据是哪几轮的哪句话，以及一句可以原样带回去问主模型的追问。
    - “复制这句追问”：复制到剪贴板，由你粘贴给主模型。
    - “我知道，有意如此” / “这条不成立”：记下你的判断，这一类疑点不再出现。
-5. 点一下伴行 = 现在看一眼。右键 → “账本”：这段对话的立足点里哪些有依据、哪些没查过，
-   这次它回头查了什么，提交过哪些轮次、多少字、几次请求。
+5. 点一下伴行 = 现在看一眼。右键 → “账本”：这段对话的立足点里哪些有依据（绿）、哪些没查过（黄）、
+   哪些被推翻（红），这次它回头查了什么，提交过哪些轮次、多少字、几次请求。
+   对话框按 Esc 关闭；同一种对话框只会开一个。
 6. 网页聊天又长了：再全选复制一次，右键 → “对话有更新：从剪贴板再读一次”。
 
 【隐私】
@@ -34,7 +45,9 @@
 
 【说明】
 这是预览版。旁听的模型判断得准不准，还没有用真实的模型和真实的对话评估过；
-它的每一条提醒都附有出处，请以原文为准。证据等级见 VERIFICATION.md，验收步骤见 ACCEPTANCE.md。
+它的每一条提醒都附有出处，请以原文为准。也还没有人在真实的 Windows 桌面上完整用过它：
+自动化检查只在 CI 机器上做过（测试、自检、静默安装与卸载）。
+证据等级见 VERIFICATION.md，验收步骤见 ACCEPTANCE.md。
 
 ------------------------------------------------
 
@@ -45,8 +58,13 @@ alongside: it keeps a ledger of what the conversation rests on, goes back over w
 said and never checked, and — when the thinking goes astray — shows one bubble with its
 passages and a question you can take back to the main model. It only reads.
 
-1. Double-click Banxing.exe (keep the _internal folder next to it). The app is unsigned: on
-   the SmartScreen prompt choose "More info" -> "Run anyway".
+0. Installer (…-setup.exe): per user, no administrator rights; Start Menu entry "伴行 Banxing",
+   optional desktop shortcut; uninstall from Settings -> Apps. Portable (….zip): unzip and keep
+   the _internal folder next to Banxing.exe. Upgrading and uninstalling leave %APPDATA%\Banxing
+   (settings, protected API key, a kept ledger) alone.
+1. Start Banxing. Neither the app nor the installer is code-signed: on the SmartScreen prompt
+   choose "More info" -> "Run anyway". A guide opens on the first start (later: right-click ->
+   "How to use").
 2. Right-click Banxing -> "Supervising model": choose a service and enter an API key —
    preferably not the model you are talking to.
 3. Right-click -> "Watch a conversation": copy a chat page and use "From the clipboard", or
@@ -56,5 +74,5 @@ passages and a question you can take back to the main model. It only reads.
    question" puts it on the clipboard for you to paste; Banxing types nothing anywhere.
 
 This is a preview: the supervising model's judgement has not been evaluated with a real
-model or on real conversations. See VERIFICATION.md and ACCEPTANCE.md. Settings and local
+model or on real conversations, and nobody has used it on a real Windows desktop yet. See VERIFICATION.md and ACCEPTANCE.md. Settings and local
 statistics (numbers only) live in %APPDATA%\Banxing.

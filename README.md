@@ -40,17 +40,23 @@
 它认六种「走偏」：目标漂移、前提没查过、结论超出证据、前后矛盾、过早收窄、原地打转。
 伴行**只读**，不往任何应用里写一个字。目标和每一步都由你定。任务怎么拆、想法怎么问清楚，交给 `grill-me` 这类技能；伴行管的是开工之后。
 
-> **当前状态（0.4.0a1，预览版）** —— 这一版是推倒重做，此前的草稿路线（v0.3）已归档到 [`legacy/v0.3/`](legacy/v0.3/README.md)。
+> **当前状态（0.4.0a2，预览版）** —— 0.4 是推倒重做，此前的草稿路线（v0.3）已归档到 [`legacy/v0.3/`](legacy/v0.3/README.md)。
+> 0.4.0a2 改进了界面（使用说明、分色的账本、悬停状态），并提供 Windows 安装程序。
 > - 应用自己的规则和流程：**离线通过（E1）**——Linux 上的自动化测试，合成的对话，脚本写好的或离线替身的回复。
 > - 旁听的模型判断得好不好、来不来得及：**E0，未评估**。没有任何真实模型读过那两份提示词；离线替身只是关键词规则，只说明流程走得通。
 > - 真实的 ChatGPT 导出、Codex 会话、Claude Code 会话、从网页复制的聊天：**E0，未验证**。测试里的数据全是合成的。
-> - Windows：**E0**。新代码没有在 Windows 上运行过；[Releases](https://github.com/QShin21/collaborator/releases) 里的 v0.3.0 是旧的草稿路线，不含本页描述的任何功能。
+> - Windows：**只到 CI 机器（E2）**。0.4.0a1 在 Windows 运行器上测试通过、打包后起得来；0.4.0a2 新增的界面和安装程序提交时还没有在 Windows 上跑过，
+>   要等这次的 CI（静默安装、运行、重装、卸载）。**没有人在真实的 Windows 桌面上用过它**：气泡不抢焦点、托盘、安装向导都没有人验过。
+>   [Releases](https://github.com/QShin21/collaborator/releases) 里的 v0.3.0 是旧的草稿路线，不含本页描述的任何功能。
 >
 > 证据等级的含义和逐项台账见 [`docs/verification.md`](docs/verification.md)，验收步骤见 [`docs/acceptance.md`](docs/acceptance.md)。
 
 ## 怎么用
 
-从源码运行（见下文）。第一次：右键伴行 → 「旁听用的模型…」，配置在旁边读对话的那个模型——**最好不是你正在对话的那一个**。
+Windows：到 [Releases](https://github.com/QShin21/collaborator/releases) 下载安装版（`…-setup.exe`，按用户安装，不需要管理员权限，
+可在「设置 → 应用」里卸载；升级和卸载都不动 `%APPDATA%\Banxing` 里的数据）或便携版（`….zip`）；也可以从源码运行（见下文）。
+第一次启动会弹出使用说明（以后在右键菜单里）。右键伴行 → 「旁听用的模型…」，配置在旁边读对话的那个模型——**最好不是你正在对话的那一个**。
+没有密钥想先看流程，可以选「离线演示」。
 
 | 你做什么 | 伴行做什么 |
 | --- | --- |
@@ -129,17 +135,20 @@ banxing/
 docs/
   design.md        产品设计与实施状态
   verification.md  证据台账                 acceptance.md  验收手册
+  evidence/        证据记录                 release-notes/ 各版本的发布说明（中文功能与使用说明）
 tests/             离线测试，只用合成数据
-packaging/windows/ 随包说明
+packaging/windows/ 随包说明、安装程序脚本（Inno Setup）、构建与安装检查脚本（PowerShell）
 legacy/            存档，不参与构建和测试：v0.1（最早的本地 Web 工作台）、v0.3（草稿路线的桌宠，连同它的方案、证据和测试）
 ```
 
 ## 发布新版本
 
-1. 修改 `banxing/__init__.py` 里的 `__version__`，更新 `docs/verification.md` 的台账。
+1. 修改 `banxing/__init__.py` 里的 `__version__`，更新 `docs/verification.md` 的台账，写 `docs/release-notes/v版本号.md`。
 2. 打 `v*` 标签并推送（或在 Actions 页面手动运行 `release` 并填版本号）。
-3. GitHub Actions 在 Windows 上跑测试、用 PyInstaller 打包、对打包结果运行自检，然后把 zip 发布为预览（pre-release）。
-   **这套工作流按新结构改写后还没有运行过。** 工作流全绿只说明到 E2；发布说明里不得写成判断质量已评估。
+3. GitHub Actions 在 Windows 上跑测试，用 `packaging/windows/build.ps1` 打包（PyInstaller → 打包结果自检 → 便携 zip → Inno Setup 安装程序），
+   用 `verify-installer.ps1` 在那台机器上真装、真跑、重装、卸载一遍，然后把安装程序和 zip 发布为预览（pre-release）。
+   同名的 Release 已存在时工作流会停下，不覆盖。每次推送的 CI 也跑同样的打包和安装检查，只是不发布。
+   **`release.yml` 本身还没有运行过**（0.4.0a1 是用一次性工作流发的）。工作流全绿只说明到 E2；发布说明里不得写成判断质量已评估。
 
 ## 来历
 

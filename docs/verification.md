@@ -14,20 +14,30 @@
 | E4 | 真实的旁听模型输出，经带标注的对话或人工检查 | 判断质量（在该模型、该提示词版本下） | 用户是否受益 |
 | E5 | 用户试用：记录、访谈、对比 | 产品是否真的帮到人 | — |
 
-## 2. 现状（0.4.0a1 预览版，2026-11-18）
+## 2. 现状（0.4.0a2 预览版，2026-11-19）
 
-这一版把产品推倒重做了（见 [`design.md`](design.md)）。开发与测试环境是 **Linux**：没有 Windows、没有模型密钥、没有任何真实对话。
+0.4.0a1 把产品推倒重做了（见 [`design.md`](design.md)）；0.4.0a2 在它上面改进了界面，并加了 Windows 安装程序。
+开发环境是 **Linux**：没有 Windows、没有模型密钥、没有任何真实对话。
 
-**一句话：应用自己的规则和流程有 E1；除此之外全部是 E0。**
+**一句话：应用自己的规则和流程有 E1；0.4.0a1 的代码在 Windows 运行器上有 E2（只到「测试通过、窗口建得出来、打包后起得来」）；
+0.4.0a2 新增的界面和安装程序在提交时只在 Linux 上跑过，Windows 上是 E0，等 CI；判断质量、真实对话、真实桌面全部是 E0。**
 
-- `python3 -m unittest discover -s tests`：Linux 上 210 项通过（2 项跳过：Windows 上的 DPAPI、需要原始方案在场的一项）。
-  `python3 run.py --selftest` 的必需项（`watch`、`prompts`、`secretbox`）通过，`tk` 一项在 Linux 的显示上通过。
-- **没有任何一行新代码在 Windows 上运行过。** 没有推送，CI 没有跑。CI 与发布工作流按新结构改写了，本身也是 E0。
+- `python3 -m unittest discover -s tests`：Linux 上 219 项通过（3 项跳过：Windows 上的 DPAPI、需要原始方案在场的一项、
+  有了证据记录之后改由人工核对措辞的一项）。
+  `python3 run.py --selftest` 的必需项（`watch`、`prompts`、`secretbox`）通过，`tk` 一项在 Linux 的显示上通过
+  （0.4.0a2 起它还会把四个对话框各开两次、按 Esc 关一个、全部关掉再开一遍）。
+- **0.4.0a1 在 Windows 运行器上**：CI 与一次性发布工作流都成功，见 [EV-2026-012](evidence/EV-2026-012.md)（E2；只读到了运行结论，
+  没有逐步核对日志）。
+- **0.4.0a2 新增的部分**（使用说明、分色的账本窗口、悬停状态、对话框只开一个 / Esc / 居中、窗口图标）：Linux 上的自动化测试，
+  加上在 Linux 的显示上截图看过（E1）。**在 Windows 上还没有运行过。**
+- **安装程序**（`packaging/windows/banxing.iss`、`build.ps1`、`verify-installer.ps1`）：在 Linux 上写成，这里既没有 Inno Setup
+  也没有 PowerShell，**一次也没有运行过（E0）**。它的第一次运行就是 CI 的 Windows 任务：静默安装、检查快捷方式和卸载项、
+  运行安装后的程序、覆盖再装一次、静默卸载、检查用户数据还在。CI 通过后是 E2（运行器），**不等于有人在真实桌面上点过安装向导**。
 - **v0.3 的 Windows 证据（EV-2026-001 至 011）不适用于这一版。** 那些记录说的是已归档的草稿路线代码，原样保存在
-  [`legacy/v0.3/docs/`](../legacy/v0.3/docs/verification.md)。唯一的关联：`banxing/winshell.py` 里的六个函数是从当时在 Windows
-  运行器上被导入并调用过的模块里原样取出的——**这只是出处，不是这一版的证据**。
+  [`legacy/v0.3/docs/`](../legacy/v0.3/docs/verification.md)。
 - **没有任何真实模型读过那两份提示词。** 离线替身是关键词规则；它在回放案例上「全部答对」是因为规则就是对着这些案例写的。
 - **没有任何真实对话被读过**：ChatGPT 导出、Codex 会话、Claude Code 会话、从网页复制的聊天页面，测试里用的全是合成的。
+- **没有人在真实的 Windows 桌面上用过它**：气泡不抢焦点、托盘、高分屏、多显示器、SmartScreen 对未签名安装程序的提示，都没有验。
 
 ## 3. 台账
 
@@ -44,12 +54,13 @@
 | W-09 | 读取：Claude Code 会话文件；从剪贴板粘贴的聊天页面；文字稿 | 已实现 | E1（合成）/ 真实数据 E0 | 同上。行的形状和「… said:」标记是假设 |
 | W-10 | 逐条同意、范围、使用范围计数；加密或不存；本机记录不含内容 | 已实现 | E1（回环地址上的假服务端；DPAPI 失败靠替换平台判断来模拟） | `tests/test_watch_shell.py::WireTests`、`StorageTests`；`tests/test_config.py` |
 | W-11 | 密钥与线路：密钥绑定地址、不跟随重定向、一次尝试一个请求、https | 已实现（代码沿用 v0.3，未改） | E1 | `tests/test_security.py`：v0.3 的重定向、密钥绑定、不重发各用例原样保留，发请求的入口换成了审查 |
-| W-12 | 桌面外壳：图标、气泡、账本窗口、选对话、模型设置、托盘 | 已实现 | E1（在 Linux 的显示上真实渲染并截图看过） | `test_watch_shell.py::ScreenTests`。**Windows 上 E0**；不抢焦点的行为只在 Windows 上才有意义，未验 |
+| W-12 | 桌面外壳：图标、气泡、账本窗口（分色、汇总、可滚动可缩放）、选对话、模型设置、使用说明（首次启动自动打开）、悬停状态、托盘；每种对话框只开一个，Esc 关闭，居中 | 已实现 | E1（在 Linux 的显示上真实渲染并截图看过）；0.4.0a1 的外壳在 Windows 运行器上 E2（[EV-2026-012](evidence/EV-2026-012.md)）；0.4.0a2 新增的部分在 Windows 上 E0 | `test_watch_shell.py::ScreenTests`（打开两次、取消、Esc、关窗、再打开）。不抢焦点的行为只在真实桌面上才有意义，未验 |
 | W-13 | 命令行 `--watch`、`--stepwise`、`--replay`、`--selftest`、`--summary` | 已实现 | E1 | `test_watch_shell.py::CommandLineTests` |
 | W-14 | 逐轮回放评测：成对案例、时机 / 准头 / 误打扰 / 主动性、一次性对照 | 已实现 | E1（流程走通，报告标注仅流程） | 11 段**合成**对话。**没有 E4** |
 | W-15 | 离线替身（旁听与独立一读各一个分支） | 已实现 | —（它本身不是证据） | `watch/standin.py` |
-| W-16 | Windows 外壳所需的系统调用 | 已取出 | E0 | `banxing/winshell.py`；见第 2 节的说明 |
-| W-17 | CI 与发布工作流 | 已改写 | E0 | `.github/workflows/`；从未运行 |
+| W-16 | Windows 外壳所需的系统调用 | 已取出 | E2（运行器：自检的 `win32` 项，[EV-2026-012](evidence/EV-2026-012.md)）；真实桌面 E0 | `banxing/winshell.py` |
+| W-17 | CI 与发布工作流 | 已改写 | `ci.yml` 的测试 / 自检 / 回放各步 E2（[EV-2026-012](evidence/EV-2026-012.md)）；它新增的打包与安装检查两步、以及 `release.yml` 本身 E0 | `.github/workflows/`。0.4.0a1 是由一次性工作流发布的，`release.yml` 从未运行 |
+| W-18 | Windows 安装程序：按用户安装（不需要管理员权限）、开始菜单与可选的桌面快捷方式、「应用」里的卸载项；升级和卸载都不动 `%APPDATA%\Banxing` | 已实现 | E0，等 CI（通过后 E2：运行器上的静默安装 / 运行 / 重装 / 卸载）；安装向导由人点一遍 E0 | `packaging/windows/banxing.iss`、`build.ps1`、`verify-installer.ps1`；`tests/test_repo.py::PackagingTests` 只核对脚本之间说的是同一回事 |
 
 ## 4. 写在代码里的假设
 
@@ -68,7 +79,8 @@
 
 | 要补的 | 等级 | 谁 | 怎么做 |
 | --- | --- | --- | --- |
-| 新代码在 Windows 上 | E2 | 协调方 | 推送后看 CI（Windows 任务会跑全部测试和 `--selftest --require tk,win32`） |
+| 0.4.0a2 的新界面和安装程序在 Windows 运行器上 | E2 | 协调方 | 推送后看 CI：Windows 任务跑全部测试、`--selftest --require tk,win32`、打包、安装检查；报告在运行的 artifacts 里（`installer-check.json`） |
+| 安装向导、SmartScreen、从旧版升级、卸载后的残留 | E2/E3（真实桌面） | 有 Windows 的人 | [`acceptance.md`](acceptance.md) 第 2 部分 U0 |
 | 一份真实的导出 / Codex 会话 / Claude Code 会话 / 复制的聊天页面读得对不对 | E3 | 有这些数据的人 | [`acceptance.md`](acceptance.md) 第 1 部分；读错的地方只报结构，做成合成夹具 |
 | 旁听模型在带标注的对话上的表现 | E4（合成对话上的结构检查） | 持有密钥的人 | `python run.py --replay --agree 地址 --report replay.json`；记下服务、模型、提示词版本 |
 | 拿真实的长对话逐轮回放 | E4（需对话的主人逐条判断） | 有自己的长对话、并愿意把它发给旁听服务的人 | `python run.py --watch 路径 --stepwise --agree 地址 --report steps.json` |

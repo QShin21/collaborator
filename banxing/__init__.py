@@ -28,6 +28,6 @@ Layout of the package (see CLAUDE.md for the rules that go with it):
   shell      ui/, cli, executor, store, config, secretbox         threads, Tk, files, entry points
 """
 
-__version__ = "0.4.0a1"
+__version__ = "0.4.0a2"
 APP_NAME = "Banxing"
 APP_ID = "Banxing"

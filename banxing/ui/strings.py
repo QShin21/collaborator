@@ -22,6 +22,7 @@ STRINGS = {
     "menu_folder": ("打开数据文件夹", "Open the data folder"),
     "menu_clear": ("清除本机数据…", "Clear local data…"),
     "menu_about": ("关于", "About"),
+    "menu_guide": ("使用说明…", "How to use…"),
     "menu_hide": ("隐藏伴行（托盘图标可找回）", "Hide Banxing (find it in the tray)"),
     "menu_show": ("显示伴行", "Show Banxing"),
     "menu_quit": ("退出", "Quit"),
@@ -204,7 +205,7 @@ STRINGS = {
     "notice_cleared": ("本机数据已清除。", "Local data cleared."),
     # ---- model dialog
     "model_title": ("旁听用的模型", "Supervising model"),
-    "model_note": ("这里配置的是在旁边读对话的那个模型。它最好**不是**你正在对话的那一个：换一个模型，才不会对同一套说法照单全收。",
+    "model_note": ("这里配置的是在旁边读对话的那个模型。它最好不是你正在对话的那一个：换一个模型，才不会对同一套说法照单全收。",
                    "This is the model that reads alongside. It should preferably NOT be the one you are talking to: a "
                    "different model does not take the same account at face value."),
     "model_provider": ("模型服务", "Service"),
@@ -233,6 +234,46 @@ STRINGS = {
                             "Windows could not encrypt the API key, so nothing was saved (the key is never written in "
                             "the clear). Sign in to Windows again and retry, or supply the key through the "
                             "BANXING_API_KEY environment variable instead."),
+    # ---- the guide and the status on hover
+    "guide_title": ("使用说明", "How to use Banxing"),
+    "guide_intro": ("伴行请另一个模型在旁边读你和 AI 的一条长对话。只有思路走偏、而且正影响眼下的方向时，它才出一条气泡。"
+                    "它只读，不替你做决定。",
+                    "Banxing has a different model read one long conversation you are having with an AI. It shows "
+                    "a bubble only when the thinking has gone astray and that bears on the direction right now. "
+                    "It only reads; the decisions stay yours."),
+    "guide_step1": ("配置旁听用的模型", "Set up the supervising model"),
+    "guide_step1_text": ("最好不是你正在对话的那一个。没有 API Key 也可以先选「离线演示」走一遍流程"
+                         "（它只是关键词规则，不代表真实的判断质量）。",
+                         "Preferably not the one you are talking to. Without an API key you can pick “Offline demo” "
+                         "to walk through the flow (keyword rules only — it says nothing about real judgement)."),
+    "guide_step1_done": ("已配置：{host}", "set up: {host}"),
+    "guide_step2": ("选一条对话，并同意把它交给这个模型读", "Choose a conversation and agree to have it read"),
+    "guide_step2_text": ("可以是 ChatGPT 导出、Codex 或 Claude Code 的会话文件、文字稿，或者在聊天页面全选、复制后从剪贴板读取。"
+                         "每条对话单独同意；可以指定从第几轮开始，更早的不提交。",
+                         "A ChatGPT export, a Codex or Claude Code session file, a transcript, or a chat page copied "
+                         "to the clipboard. Each conversation is agreed to on its own; you can name the first turn "
+                         "to read — earlier ones are not sent."),
+    "guide_step2_done": ("正在旁听", "watching"),
+    "guide_step3": ("气泡出现时", "When a bubble appears"),
+    "guide_step3_text": ("「查看依据」列出原文出处；「复制这句追问」把问题放进剪贴板，由你粘贴给主模型；"
+                         "「我知道，有意如此」和「这条不成立」会记进账本，同类提醒不再重复。"
+                         "没有气泡不等于没有问题：随时可以点一下伴行让它现在看一眼，或者打开账本。",
+                         "“Show the sources” lists the passages; “Copy the question” puts the question on the "
+                         "clipboard for you to paste to the main model; “I know — it is intended” and “This does "
+                         "not hold” go on the ledger and that kind of reminder stays away. No bubble does not mean "
+                         "no problem: click the figure to have it look now, or open the ledger."),
+    "guide_go_model": ("配置模型…", "Set up the model…"),
+    "guide_go_watch": ("选择对话…", "Choose a conversation…"),
+    "guide_tips": ("小提示：单击伴行＝现在看一眼；右键＝菜单；拖动可以挪位置；鼠标停在伴行上会显示当前状态；Esc 关闭对话框。",
+                   "Tips: click the figure = look now; right-click = menu; drag to move it; rest the pointer on it "
+                   "to see the status; Esc closes a dialog."),
+    "guide_privacy": ("对话不会被复制保存；账本默认只在内存里（勾选后才加密保存）；本机的统计记录不含任何对话内容。"
+                      "这份说明随时可以从右键菜单再打开。",
+                      "The conversation is never copied; the ledger lives in memory unless you tick encrypted "
+                      "keeping; the local statistics hold no content. This guide can be reopened from the menu."),
+    "hover_model": ("单击：配置旁听用的模型 · 右键：菜单", "Click: set up the supervising model · right-click: menu"),
+    "hover_watch": ("单击：选一条对话 · 右键：菜单", "Click: choose a conversation · right-click: menu"),
+    "hover_look": ("单击：现在看一眼 · 右键：菜单（账本在里面）", "Click: look now · right-click: menu (the ledger is there)"),
     # ---- other
     "clear_confirm": ("这会删除伴行在这台电脑上保存的全部内容：模型配置和密钥、保存的账本、试用记录，并结束正在进行的旁听。要继续吗？",
                       "This deletes everything Banxing keeps on this computer: model settings and key, a kept ledger "

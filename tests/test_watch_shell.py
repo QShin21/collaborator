@@ -526,7 +526,7 @@ class ViewModelTests(unittest.TestCase):
     def test_the_menu_and_the_status_follow_the_state(self):
         rig = Rig(self)
         ids = lambda: [item.id for item in viewmodel.menu_items(rig.watcher.state()) if item.id]      # noqa: E731
-        self.assertEqual(ids(), ["watch", "model", "folder", "clear", "about", "quit"])
+        self.assertEqual(ids(), ["watch", "model", "folder", "clear", "guide", "about", "quit"])
         self.assertEqual(viewmodel.menu_items(rig.watcher.state())[0].label, "还没有在旁听的对话")
         rig.start()
         self.assertEqual(ids()[:5], ["look", "ledger", "pause", "stop", "watch"])
@@ -540,7 +540,37 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn("paste", [i.id for i in viewmodel.menu_items({"active": True, "model": "x", "source": "pasted_text"})])
         self.assertIn("hide", [i.id for i in viewmodel.menu_items(rig.watcher.state(), has_tray=True)])
         self.assertEqual([i.id for i in viewmodel.tray_items({"active": False}, False) if i.id],
-                         ["show", "watch", "model", "quit"])
+                         ["show", "watch", "model", "guide", "quit"])
+
+    def test_the_ledger_rows_say_how_each_is_to_be_shown_and_the_summary_counts_the_footing(self):
+        rig = Rig(self)
+        rig.start()
+        session = rig.watcher.session
+        rows = viewmodel.ledger_rows(session.ledger, session.findings, session.usage, "", session.last)
+        self.assertEqual([text for text, _ in rows],
+                         viewmodel.ledger_lines(session.ledger, session.findings, session.usage, "", session.last))
+        kinds = {text.strip()[:1]: kind for text, kind in rows if text.strip()[:1] in tuple("？✓!")}
+        self.assertEqual(kinds, {"？": viewmodel.UNCHECKED_ROW, "✓": viewmodel.BACKED_ROW, "!": viewmodel.FINDING_ROW})
+        self.assertEqual(rows[0][1], viewmodel.HEAD)
+        self.assertEqual(rows[-1][1], viewmodel.MUTED_ROW)                          # what was sent, last and quiet
+        self.assertEqual({kind for _, kind in rows} - {viewmodel.HEAD, viewmodel.PLAIN, viewmodel.MUTED_ROW,
+                                                       viewmodel.BACKED_ROW, viewmodel.UNCHECKED_ROW,
+                                                       viewmodel.BROKEN_ROW, viewmodel.FINDING_ROW, viewmodel.DETAIL},
+                         set())
+        self.assertEqual(viewmodel.ledger_summary(session.ledger, session.findings),
+                         (("正在影响方向", 1, viewmodel.FINDING_ROW), ("没查过", 1, viewmodel.UNCHECKED_ROW),
+                          ("有依据", 3, viewmodel.BACKED_ROW)))
+        self.assertEqual(viewmodel.ledger_summary(lg.Ledger()), ())                 # nothing there: nothing claimed
+
+    def test_the_bubble_names_its_weight_and_the_figure_says_what_a_click_does(self):
+        rig = Rig(self)
+        rig.start()
+        view = viewmodel.nudge_view(rig.view.bubble)
+        self.assertEqual((view.tone, view.weight), ("direction", "正在影响方向"))
+        self.assertEqual(viewmodel.hover_text(rig.watcher.state()),
+                         "旁听中 · 已读到第 7 轮 · 账上记着 1 处疑点\n单击：现在看一眼 · 右键：菜单（账本在里面）")
+        self.assertIn("单击：选一条对话", viewmodel.hover_text({"model": "mock", "active": False}))
+        self.assertIn("单击：配置旁听用的模型", viewmodel.hover_text({"model": "", "active": False}))
 
     def test_every_notice_and_every_built_key_has_words_in_both_languages(self):
         for key, pair in strings.STRINGS.items():
@@ -813,6 +843,30 @@ class ScreenTests(unittest.TestCase):
         walk(window)
         return "\n".join(found)
 
+    def widgets(self, window, kind):
+        found = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() == kind:
+                    found.append(child)
+                walk(child)
+        walk(window)
+        return found
+
+    def escape(self, window):
+        """Press Esc in a dialog. Tk hands a key to nobody while the application does not
+        have the keyboard (a CI machine may not give it): then the key cannot be tried
+        here, and the dialog is closed the other way."""
+        window.focus_force()
+        self.app.root.update()
+        window.event_generate("<Escape>")
+        self.app.root.update()
+        if window.winfo_exists():
+            self.assertIsNone(self.app.root.focus_get(), "Esc did not close the dialog")
+            window.destroy()
+            self.app.root.update()
+
     def click(self, window, label):
         def find(widget):
             for child in widget.winfo_children():
@@ -866,8 +920,13 @@ class ScreenTests(unittest.TestCase):
         self.app.open_ledger()
         self.app.root.update()
         window = self.app._ledger["window"]
-        output = next(child for child in window.winfo_children() if child.winfo_class() == "Text")
+        output = self.widgets(window, "Text")[0]
         text = output.get("1.0", "end")
+        self.assertIn("没查过 1", self.texts(window))                               # the summary above the ledger
+        line = text.splitlines().index(next(row for row in text.splitlines() if "？ 没查过" in row)) + 1
+        self.assertIn("unchecked", output.tag_names(f"{line}.4"))                   # coloured by what backs it
+        self.assertEqual(str(output.cget("state")), "disabled")
+        self.assertTrue(self.widgets(window, "Scrollbar"))
         for needle in ("你想回答的问题（你说过）", "这段对话立在什么上面", "？ 没查过", "使用范围：已读到第 7 轮", "最近一次回查"):
             self.assertIn(needle, text)
         self.watcher.correct_goal("只比较长问题")
@@ -875,6 +934,16 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("你想回答的问题（你亲手改写）", output.get("1.0", "end"))
         self.app.open_ledger()                                                     # asked twice: still one window
         self.assertEqual(len(self.app.dialog_windows), 1)
+        self.click(window, "更正目标…")
+        self.click(window, "更正目标…")                                              # twice: one dialog, not two
+        self.assertEqual(len(self.app.dialog_windows), 2)
+        self.click(self.app.dialog_windows[-1], "取消")
+        self.assertEqual(len(self.app.dialog_windows), 1)
+        self.assertEqual(self.watcher.session.ledger.goal.text, "只比较长问题")      # cancelled: nothing changed
+        self.click(window, "上次提交了什么")
+        self.assertIn("第 1 轮", self.widgets(self.app.dialog_windows[-1], "Text")[0].get("1.0", "end"))
+        self.app.dialog_windows[-1].destroy()
+        self.app.root.update()
         self.click(window, "结束旁听")
         self.assertFalse(self.watcher.active)
         self.assertEqual(self.app._ledger, {})
@@ -905,7 +974,7 @@ class ScreenTests(unittest.TestCase):
         self.app.root.update()
         window = self.app.dialog_windows[-1]
         self.click(window, "从剪贴板读取（先在聊天页面全选、复制）")
-        chooser = next(child for child in window.winfo_children() if child.winfo_class() == "Listbox")
+        chooser = self.widgets(window, "Listbox")[0]
         self.assertIn("剪贴板里的对话", "\n".join(chooser.get(0, "end")))
         self.click(window, "同意并开始旁听")
         self.assertEqual((self.watcher.active, self.watcher.state()["source"]), (True, sources.PASTED))
@@ -916,11 +985,81 @@ class ScreenTests(unittest.TestCase):
         self.app.open_model()
         self.app.root.update()
         window = self.app.dialog_windows[-1]
-        self.assertIn("它最好不是你正在对话的那一个".replace("不是", "**不是**"), self.texts(window).replace("\n", ""))
+        self.assertIn("它最好不是你正在对话的那一个", self.texts(window).replace("\n", ""))
+        self.assertNotIn("*", self.texts(window))
         self.click(window, "保存")
         self.assertIn("请填写 API Key", self.texts(window))
         self.assertEqual(fresh.get("provider"), "")
         self.assertTrue(window.winfo_exists())
+
+    def test_every_dialog_opens_once_closes_by_esc_or_cancel_and_opens_again(self):
+        app = self.app
+        self.start()
+        for name, opener in (("model", app.open_model), ("watch", app.open_watch), ("ledger", app.open_ledger),
+                             ("guide", app.open_guide)):
+            for way in ("escape", "button", "window"):
+                opener()
+                app.root.update()
+                opener()                                                           # asked again while it is open
+                app.root.update()
+                self.assertEqual(len(app.dialog_windows), 1, (name, way))
+                window = app.dialog_windows[0]
+                self.assertTrue(window.winfo_viewable(), name)
+                x, y = window.winfo_rootx(), window.winfo_rooty()
+                self.assertTrue(0 <= x < app.root.winfo_screenwidth() and 0 <= y < app.root.winfo_screenheight())
+                if way == "escape":
+                    self.escape(window)
+                elif way == "button":
+                    self.click(window, "关闭" if name in ("ledger", "guide") else "取消")
+                else:
+                    window.destroy()                                               # the ✕ of the title bar
+                    app.root.update()
+                self.assertEqual((app.dialogs, app.dialog_windows, app._open), (0, [], {}), (name, way))
+        self.assertEqual(app._ledger, {})
+        self.assertTrue(self.watcher.active)                                       # closing dialogs changed nothing
+        self.assertEqual(self.settings.get("provider"), "")
+
+    def test_the_guide_opens_by_itself_once_and_leads_to_the_next_step(self):
+        app = self.app
+        app.greet()
+        app.root.update()
+        self.assertTrue(self.settings.get("guide_seen"))
+        window = app.dialog_windows[-1]
+        text = self.texts(window).replace("\n", "")
+        for needle in ("配置旁听用的模型", "✓ 已配置：这台电脑（离线演示）", "选一条对话，并同意把它交给这个模型读", "气泡出现时",
+                       "Esc 关闭对话框"):
+            self.assertIn(needle, text)
+        self.assertNotIn("正在旁听", text)
+        self.click(window, "选择对话…")                                             # goes on to the next step
+        self.assertFalse(window.winfo_exists())
+        self.assertEqual(str(app.dialog_windows[-1].title()), "旁听一条对话")
+        app.dialog_windows[-1].destroy()
+        app.root.update()
+        app.greet()                                                                # the second start: one line, no dialog
+        app.root.update()
+        self.assertEqual(app.dialog_windows, [])
+        self.assertTrue(app.toast.winfo_viewable())
+        self.start()
+        app.command("guide")                                                       # and from the menu, any time
+        app.root.update()
+        self.assertIn("✓ 正在旁听", self.texts(app.dialog_windows[-1]))
+
+    def test_resting_on_the_figure_shows_the_status_and_never_covers_what_is_being_said(self):
+        app = self.app
+        app._hover_in()
+        app._hover_show()
+        self.assertTrue(app.toast.winfo_viewable())
+        self.assertIn("还没有在旁听的对话", self.texts(app.toast).replace("\n", ""))
+        app._hover_out()
+        self.assertFalse(app.toast.winfo_viewable())
+        app._say("别的话")
+        app._hover_show()
+        self.assertIn("别的话", self.texts(app.toast))                              # a notice is not replaced…
+        app._hover_out()
+        self.assertTrue(app.toast.winfo_viewable())                                # …nor taken away by the pointer
+        self.start()
+        app._hover_show()
+        self.assertFalse(app._hovering)                                            # and not next to a bubble
 
     def test_closing_everything_leaves_no_tk_object_behind(self):
         import tkinter
@@ -928,6 +1067,8 @@ class ScreenTests(unittest.TestCase):
         self.app.open_ledger()
         self.app.open_watch()
         self.app.open_model()
+        self.app.open_guide()
+        self.app._hover_in()
         self.app.root.update()
         with self.assertRaises(Exception):                                         # only the owning thread may end it
             worker = threading.Thread(target=lambda: errors.append(self._try(self.app.destroy)))

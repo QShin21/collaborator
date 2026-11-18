@@ -78,7 +78,7 @@ class DocumentTests(unittest.TestCase):
     def test_the_ledger_has_a_row_for_every_work_package_and_claims_nothing_beyond_e1(self):
         ledger = self.read("docs/verification.md")
         rows = re.findall(r"(?m)^\| (W-\d\d) \|.*$", ledger)
-        self.assertEqual(rows, [f"W-{n:02d}" for n in range(1, 18)])
+        self.assertEqual(rows, [f"W-{n:02d}" for n in range(1, 19)])
         records = list((ROOT / "docs" / "evidence").glob("EV-*.md")) if (ROOT / "docs" / "evidence").is_dir() else []
         if records:
             self.skipTest("evidence has been recorded; review the wording by hand")
@@ -138,6 +138,95 @@ class DocumentTests(unittest.TestCase):
             self.assertIn(f'"{option}"', source, option)
         for relative in set(re.findall(r"\]\(((?:docs|legacy)/[\w./\-]+)\)", readme)):
             self.assertTrue((ROOT / relative).exists(), relative)
+
+
+class PackagingTests(unittest.TestCase):
+    """The installer and the workflows cannot be run here (no Windows, no Inno Setup, no
+    PowerShell). These only check that the files agree with each other and with the code."""
+    APP_GUID = "53BFD128-3CC7-4A13-8915-94F7446099F3"
+
+    def read(self, relative):
+        return (ROOT / relative).read_text(encoding="utf-8-sig")
+
+    def workflows(self):
+        return {path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))}
+
+    def test_the_installer_keeps_its_identity_asks_for_no_rights_and_leaves_user_data_alone(self):
+        raw = (ROOT / "packaging" / "windows" / "banxing.iss").read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))                           # or the Chinese names are mangled
+        script = self.read("packaging/windows/banxing.iss")
+        self.assertIn("AppId={{" + self.APP_GUID + "}", script)                    # never changes: upgrades find it
+        self.assertIn("PrivilegesRequired=lowest", script)
+        self.assertIn("{#AppVersion}", script)
+        from banxing import APP_ID
+        self.assertIn(f"AppMutex={APP_ID}-Banxing", script)                        # the name the running app holds
+        self.assertIn('"Local\\\\" + APP_ID + "-Banxing"', (ROOT / "banxing" / "cli.py").read_text(encoding="utf-8"))
+        active = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith(";"))
+        for section in ("[UninstallDelete]", "[InstallDelete]", "[Registry]", "[Code]", "[UninstallRun]"):
+            self.assertNotIn(section, active)                                      # it removes only what it installed
+        places = set(re.findall(r"\{(?!\{)(#?[a-z]+)", active, re.I))                # every folder constant it uses
+        self.assertEqual(places, {"#AppVersion", "#NumericVersion", "#SourceDir", "#OutputDir", "#IconFile",
+                                  "app", "autopf", "autoprograms", "autodesktop", "cm"})   # none is the user's data
+        self.assertEqual(re.findall(r"(?m)^\[(\w+)\]", active), ["Setup", "Languages", "Tasks", "Files", "Icons", "Run"])
+        check = self.read("packaging/windows/verify-installer.ps1")
+        self.assertIn("{" + self.APP_GUID + "}_is1", check)
+        for needle in ("/VERYSILENT", "unins000.exe", "settings.json", "the user's data folder was left alone"):
+            self.assertIn(needle, check)
+
+    def test_the_build_the_checks_and_the_workflows_name_the_same_files(self):
+        script = self.read("packaging/windows/banxing.iss")
+        build = self.read("packaging/windows/build.ps1")
+        self.assertIn("OutputBaseFilename=Banxing-v{#AppVersion}-windows-x64-setup", script)
+        self.assertIn('$name = "Banxing-v$Version-windows-x64"', build)
+        self.assertIn('"$name-setup.exe"', build)
+        for define in re.findall(r"\{#(\w+)\}", script):
+            self.assertIn(f"/D{define}=", build, define)                           # everything the script needs is passed
+        self.assertIn('--add-data "banxing/prompts;banxing/prompts"', build)
+        self.assertIn("--selftest", build)
+        workflows = self.workflows()
+        self.assertIn(r"release\Banxing-v$version-windows-x64-setup.exe", workflows["ci.yml"])
+        for name, text in workflows.items():
+            self.assertIn("packaging/windows/build.ps1", text, name)               # one build, tested on every push
+            self.assertIn("packaging/windows/verify-installer.ps1", text, name)
+            self.assertLess(text.index("unittest discover"), text.index("build.ps1 -Version"), name)
+            self.assertLess(text.index("build.ps1 -Version"), text.index("verify-installer.ps1 -Setup"), name)
+        self.assertNotIn("softprops", workflows["ci.yml"])                         # CI publishes nothing
+
+    def test_a_release_is_a_preview_with_its_notes_and_never_replaces_one(self):
+        version = banxing.__version__
+        notes = self.read(f"docs/release-notes/v{version}.md")
+        for needle in (version, "预览版", f"Banxing-v{version}-windows-x64-setup.exe", f"Banxing-v{version}-windows-x64.zip",
+                       "没有验证的", "没有代码签名", "升级和卸载都不动你的数据"):
+            self.assertIn(needle, notes)
+        self.assertNotRegex(notes, r"(?:真机|真实模型|真实桌面)[^。\n]{0,12}(?:已验证|通过)")
+        publishing = {name: text for name, text in self.workflows().items() if "softprops/action-gh-release" in text}
+        self.assertIn("release.yml", publishing)
+        for name, text in publishing.items():
+            publish = text[text.index("softprops/action-gh-release"):]
+            self.assertIn("prerelease: true", publish, name)
+            self.assertIn("fail_on_unmatched_files: true", publish, name)
+            self.assertIn("body_path: docs/release-notes/", publish, name)
+            self.assertIn("release/*-setup.exe", publish, name)
+            before = text[:text.index("softprops/action-gh-release")]
+            self.assertIn("never overwrites one", before, name)                    # checked before anything is published
+            self.assertLess(before.index("verify-installer.ps1 -Setup"), len(before), name)
+
+    def test_a_one_time_release_workflow_is_for_this_version_only(self):
+        """Such a file starts a release by being pushed. One for an older version must not
+        linger (a later edit of it would start that release again), and the one for this
+        version can only build the tree it names."""
+        once = {name: text for name, text in self.workflows().items() if name.startswith("release-once-")}
+        version = banxing.__version__
+        self.assertLessEqual(len(once), 1)
+        for name, text in once.items():
+            self.assertEqual(name, f"release-once-v{version}.yml")
+            self.assertIn(f"VERSION: v{version}\n", text)
+            self.assertRegex(text, r"TARGET_TREE: [0-9a-f]{40}\n")
+            self.assertIn(f'paths: [".github/workflows/{name}"]', text)
+            self.assertIn("branches: [main]", text)
+            self.assertNotIn("workflow_dispatch", text)
+            self.assertNotRegex(text, r"(?m)^\s+tags:")
+            self.assertIn("target_commitish: ${{ env.TARGET_SHA }}", text)
 
 
 if __name__ == "__main__":
